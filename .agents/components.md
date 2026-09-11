@@ -24,6 +24,9 @@ may use a narrow sandbox capability.
 - Deep Research Bench and SWE-Atlas QA keep rubrics/reference material host-side;
   download the agent output only after isolation. DRB's optional FACT pass does
   not change its RACE-derived score.
+- Toolathlon runs its own preprocess and MCP gateway inside the sandbox. Its
+  grader and ground truth are archived host-side and proved absent before
+  bridge access, and restored only after isolation is confirmed.
 
 ## Harness and bridge changes
 
