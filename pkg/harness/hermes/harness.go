@@ -277,6 +277,11 @@ func New(options Options) (*Manager, error) {
 	if options.APIKeyLookup == nil {
 		options.APIKeyLookup = environmentAPIKeyLookup
 	}
+	// Profile errors in the MCP block surface here rather than at the first
+	// task's Start.
+	if _, err := renderMCPServers(options.MCPServers); err != nil {
+		return nil, err
+	}
 	if options.Mode == "" {
 		options.Mode = ModeAgent
 	}
@@ -391,6 +396,11 @@ func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) 
 		}
 		return err
 	}
+	mcpBlock, err := renderMCPServers(manager.mcpServers)
+	if err != nil {
+		return err
+	}
+	configuration = append(configuration, mcpBlock...)
 	environment, err := containerEnvironment(request.Endpoint, workspaceRoot, manager.terminalTimeout, manager.webSearchEnabled, request.RunID, request.TaskID)
 	if err != nil {
 		return err
