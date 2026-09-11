@@ -679,6 +679,10 @@ these guides:
   explicitly disable grading. It rejects `environment` and `fact`.
 - [SWE-bench Pro](benchmarks/swe-bench-pro.md) derives environments from dataset
   rows and uses its pinned evaluator. It rejects `environment`, `judge`, and `fact`.
+- [Toolathlon](benchmarks/toolathlon.md) requires `environment.image` (Toolathlon's
+  task image), `harness.type: "hermes"`, and a `harness.mcp_servers` entry for its
+  gateway. The optional `toolathlon` block sets the gateway port, the
+  application host, and the step limit.
 
 ### Judge model settings
 
