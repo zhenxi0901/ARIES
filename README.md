@@ -90,7 +90,7 @@ implementations:
 | Role or service | Implementation |
 | --- | --- |
 | Agent harness | OpenClaw (text and realtime voice modes); Hermes (text) |
-| Benchmark | Terminal-Bench 2; Deep Research Bench; SWE-Atlas QA; the 731-task public SWE-bench Pro split |
+| Benchmark | Terminal-Bench 2; Deep Research Bench; SWE-Atlas QA; the 731-task public SWE-bench Pro split; Toolathlon |
 | Tool sandbox | Shared Docker deployment through the Moby Go SDK |
 | Tool bridge | Embedded OpenClaw SSH bridge; embedded Hermes SSH bridge |
 | Model service | External DeepSeek; external OpenAI-compatible servers such as vLLM; external or ARIES-managed SGLang |
