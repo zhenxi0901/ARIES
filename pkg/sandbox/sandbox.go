@@ -25,11 +25,15 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// NetworkAlias is the sandbox's name on its per-task network: the only name
+// at which the harness container can reach it, and therefore the host every
+// in-sandbox endpoint (such as a benchmark's MCP gateway) is configured with.
+const NetworkAlias = "task-sandbox"
+
 const (
 	defaultCleanupTimeout = 30 * time.Second
 	maxExecInput          = 16 << 20
 	maxConfiguredOutput   = 1 << 30
-	networkAlias          = "task-sandbox"
 )
 
 var (
@@ -204,7 +208,7 @@ func (m *Manager) Start(ctx context.Context, request core.SandboxRequest) (runne
 		Env:        taskEnvironment(env.Env),
 		Entrypoint: []string{"/bin/sleep"}, Args: []string{"infinity"},
 		Labels:  ownershipLabels(request, "task-container"),
-		Network: s.networkName, NetworkAliases: []string{networkAlias},
+		Network: s.networkName, NetworkAliases: []string{NetworkAlias},
 		StorageMB: env.StorageMB, GPUs: env.GPUs,
 		Init: true, NoNewPrivileges: env.ExecUser != "", AllowImageVolumes: true,
 	}

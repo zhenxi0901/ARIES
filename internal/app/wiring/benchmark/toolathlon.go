@@ -3,9 +3,13 @@ package benchmark
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
+	"strconv"
 
 	"github.com/hyscale-lab/aries/pkg/benchmark/toolathlon"
 	"github.com/hyscale-lab/aries/pkg/config"
+	"github.com/hyscale-lab/aries/pkg/sandbox"
 )
 
 // NewToolathlon constructs the benchmark for preparation or execution.
@@ -25,7 +29,38 @@ func ValidateToolathlon(cfg config.Config) error {
 	if cfg.Harness.Type != "hermes" || len(cfg.Harness.MCPServers) == 0 {
 		return errors.New("benchmark type \"toolathlon\" requires the hermes harness with a harness.mcp_servers entry for the gateway")
 	}
+	// And that server must be the gateway the adapter starts -- the
+	// sandbox's alias on the gateway port. Any other endpoint would
+	// start Hermes with no Toolathlon tools at all.
+	if !hasToolathlonGateway(cfg) {
+		return fmt.Errorf("benchmark type \"toolathlon\" requires a harness.mcp_servers entry at http://%s:%d, the gateway the adapter starts", sandbox.NetworkAlias, toolathlonGatewayPort(cfg))
+	}
 	return nil
+}
+
+// toolathlonGatewayPort is the port the adapter will start the gateway on
+// for this profile.
+func toolathlonGatewayPort(cfg config.Config) int {
+	if settings := cfg.Benchmark.Toolathlon; settings != nil && settings.GatewayPort != 0 {
+		return settings.GatewayPort
+	}
+	return toolathlon.DefaultGatewayPort
+}
+
+// hasToolathlonGateway reports whether one of the profile's MCP servers is
+// the sandbox's gateway: the sandbox's network alias on the gateway port.
+func hasToolathlonGateway(cfg config.Config) bool {
+	port := strconv.Itoa(toolathlonGatewayPort(cfg))
+	for _, server := range cfg.Harness.MCPServers {
+		parsed, err := url.Parse(server.URL)
+		if err != nil {
+			continue
+		}
+		if parsed.Hostname() == sandbox.NetworkAlias && parsed.Port() == port {
+			return true
+		}
+	}
+	return false
 }
 
 // toolathlonOptions maps the profile onto the adapter. The model ID is

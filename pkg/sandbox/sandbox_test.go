@@ -154,7 +154,7 @@ func TestSharedDeploymentReceivesSandboxPolicy(t *testing.T) {
 	if r.Workdir != "/work" || !r.Init || !r.NoNewPrivileges || !r.AllowImageVolumes || r.StorageMB != 64 || r.GPUs != 1 || *r.CPU != 0.5 || *r.MemoryMB != 32 {
 		t.Fatalf("lost policy: %+v", r)
 	}
-	if !reflect.DeepEqual(r.Entrypoint, []string{"/bin/sleep"}) || !reflect.DeepEqual(r.Args, []string{"infinity"}) || !reflect.DeepEqual(r.NetworkAliases, []string{networkAlias}) {
+	if !reflect.DeepEqual(r.Entrypoint, []string{"/bin/sleep"}) || !reflect.DeepEqual(r.Args, []string{"infinity"}) || !reflect.DeepEqual(r.NetworkAliases, []string{NetworkAlias}) {
 		t.Fatalf("runtime: %+v", r)
 	}
 	if r.Network != s.NetworkName() || f.environmentRequest.Environment.AllowNetwork || r.Labels["aries.component"] != "sandbox" || f.environmentRequest.RunID != "run" {

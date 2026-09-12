@@ -34,7 +34,7 @@ const (
 	tavilyAPIKeyEnv = "TAVILY_API_KEY"
 
 	// searxngBaseURL matches the fixed network alias
-	// (pkg/sandbox/sandbox.go's `networkAlias = "task-sandbox"`) and
+	// (pkg/sandbox/sandbox.go's `NetworkAlias = "task-sandbox"`) and
 	// port (images/deep-research-bench/Dockerfile) that the DRB task
 	// sandbox's built-in SearXNG instance is always reachable at from the
 	// Hermes harness container, which joins the same per-task Docker
