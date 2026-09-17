@@ -309,7 +309,7 @@ func findCredentialField(value any, path string) string {
 	return ""
 }
 
-// HarnessMCPConfig is a Hermes-only concept (see (*HarnessConfig).validate):
+// HarnessMCPConfig is an OpenClaw/Hermes concept (see (*HarnessConfig).validate):
 // remote MCP servers the harness connects to at startup, beyond any the
 // benchmark provides. A benchmark whose tools are an MCP server inside the
 // task sandbox (Toolathlon's gateway) is added to the client by wiring, not
