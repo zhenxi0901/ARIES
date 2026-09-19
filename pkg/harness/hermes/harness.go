@@ -329,6 +329,14 @@ func New(options Options) (*Manager, error) {
 	}, nil
 }
 
+// MCPServers returns a copy of the configured MCP servers on the manager.
+func (manager *Manager) MCPServers() []harness.MCPServerConfig {
+	if manager == nil {
+		return nil
+	}
+	return append([]harness.MCPServerConfig(nil), manager.mcpServers...)
+}
+
 func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()

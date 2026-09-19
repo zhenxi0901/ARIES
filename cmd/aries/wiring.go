@@ -261,6 +261,7 @@ func newHarness(cfg config.Config, outputRoot string, lookup func(string) ([]byt
 			ExtractAPIKeyEnv:       cfg.Harness.WebSearch.ExtractAPIKeyEnv,
 			SubagentsEnabled:       cfg.Harness.Subagents.Enabled != nil && *cfg.Harness.Subagents.Enabled,
 			MaxConcurrentSubagents: cfg.Harness.Subagents.MaxConcurrent,
+			MCPServers:             cfg.Harness.MCPServers,
 		}
 		if cfg.Harness.Mode == openclawharness.ModeRealtime || cfg.Harness.Mode == openclawharness.ModeVoiceTranscribe {
 			options.Realtime = openClawVoiceOptions(cfg.Harness)
@@ -279,6 +280,7 @@ func newHarness(cfg config.Config, outputRoot string, lookup func(string) ([]byt
 			MaxConcurrentSubagents: cfg.Harness.Subagents.MaxConcurrent,
 			Compaction:             hermesCompaction(cfg.Harness.Compaction),
 			ExtraBody:              hermesExtraBody(cfg.Harness.Hermes),
+			MCPServers:             cfg.Harness.MCPServers,
 		}
 
 		if cfg.Harness.Mode == hermesharness.ModeVoiceTranscribe {
