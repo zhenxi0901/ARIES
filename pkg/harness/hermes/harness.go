@@ -479,8 +479,9 @@ func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) 
 		runID: request.RunID, taskID: request.TaskID, attemptID: id,
 		containerName: "aries-hermes-" + id,
 		artifactDir:   filepath.Join(manager.outputDir, request.TaskID, "harness"),
+		endpoint:     request.Endpoint, model: request.Model,
 		agentTimeout: agentTimeout, apiKey: apiKey, extractAPIKey: extractAPIKey, voiceAPIKey: voiceAPIKey,
-		mcpClients: mcpClients,
+		mcpClients:  mcpClients,
 	}
 	fail := func(primary error) error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), manager.cleanupTimeout)
