@@ -21,15 +21,15 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
-	audioinput "github.com/hyscale-lab/aries/pkg/audio"
 	"github.com/hyscale-lab/aries/internal/harness"
+	audioinput "github.com/hyscale-lab/aries/pkg/audio"
 	"github.com/hyscale-lab/aries/pkg/containerimage"
 	"github.com/hyscale-lab/aries/pkg/core"
 	"github.com/hyscale-lab/aries/pkg/runner"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sirupsen/logrus"
 )
 
@@ -277,11 +277,6 @@ func New(options Options) (*Manager, error) {
 	if options.APIKeyLookup == nil {
 		options.APIKeyLookup = environmentAPIKeyLookup
 	}
-	// Profile errors in the MCP block surface here rather than at the first
-	// task's Start.
-	if _, err := renderMCPServers(options.MCPServers); err != nil {
-		return nil, err
-	}
 	if options.Mode == "" {
 		options.Mode = ModeAgent
 	}
@@ -371,8 +366,9 @@ func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) 
 		voiceSTT = &manager.voiceTranscribe.STT
 	}
 
+	renderServers, clientServers := harness.Merge(manager.mcpServers, request.MCPServers)
 	var mcpClients []*harness.MCPClient
-	for _, server := range manager.mcpServers {
+	for _, server := range clientServers {
 		client, err := harness.NewMCPClient(server)
 		if err != nil {
 			return fmt.Errorf("Hermes initialize MCP server %q: %w", server.Name, err)
@@ -388,7 +384,7 @@ func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) 
 	configuration, err := renderConfig(request.Model, renderSettings{
 		maxTurns: manager.maxTurns, webSearchEnabled: manager.webSearchEnabled, extractEnabled: extractEnabled,
 		subagentsEnabled: manager.subagentsEnabled, maxConcurrentSubagents: manager.maxConcurrentSubagents,
-		compaction: manager.compaction, extraBody: manager.extraBody, mcpServers: manager.mcpServers,
+		compaction: manager.compaction, extraBody: manager.extraBody, mcpServers: renderServers,
 	}, voiceSTT)
 	if err != nil {
 		for _, c := range mcpClients {
@@ -396,11 +392,6 @@ func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) 
 		}
 		return err
 	}
-	mcpBlock, err := renderMCPServers(manager.mcpServers)
-	if err != nil {
-		return err
-	}
-	configuration = append(configuration, mcpBlock...)
 	environment, err := containerEnvironment(request.Endpoint, workspaceRoot, manager.terminalTimeout, manager.webSearchEnabled, request.RunID, request.TaskID)
 	if err != nil {
 		return err
@@ -489,9 +480,9 @@ func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) 
 		runID: request.RunID, taskID: request.TaskID, attemptID: id,
 		containerName: "aries-hermes-" + id,
 		artifactDir:   filepath.Join(manager.outputDir, request.TaskID, "harness"),
-		endpoint:     request.Endpoint, model: request.Model,
+		endpoint:      request.Endpoint, model: request.Model,
 		agentTimeout: agentTimeout, apiKey: apiKey, extractAPIKey: extractAPIKey, voiceAPIKey: voiceAPIKey,
-		mcpClients:  mcpClients,
+		mcpClients: mcpClients,
 	}
 	fail := func(primary error) error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), manager.cleanupTimeout)

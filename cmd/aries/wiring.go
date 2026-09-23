@@ -61,14 +61,15 @@ func validateComponents(cfg config.Config) error {
 	case "toolathlon":
 		// Toolathlon's tools reach the harness only as an MCP server; both
 		// harnesses have an MCP client. The gateway itself is added to that
-		// client by mcpServers, so a profile's own harness.mcp entries are
-		// extra servers and may not take its name.
+		// client by the adapter once the sandbox is up, so a profile's own
+		// harness.mcp_servers entries are extra servers and may not take its
+		// name.
 		if cfg.Harness.Type != "hermes" && cfg.Harness.Type != "openclaw" {
 			return fmt.Errorf("benchmark type \"toolathlon\" requires a harness with an MCP client (hermes or openclaw), not %q", cfg.Harness.Type)
 		}
-		for _, server := range cfg.Harness.MCP.Servers {
+		for _, server := range cfg.Harness.MCPServers {
 			if server.Name == toolathlon.GatewayServerName {
-				return fmt.Errorf("harness.mcp.servers may not name %q: the adapter adds Toolathlon's gateway to the harness itself", toolathlon.GatewayServerName)
+				return fmt.Errorf("harness.mcp_servers may not name %q: the adapter adds Toolathlon's gateway to the harness itself", toolathlon.GatewayServerName)
 			}
 		}
 	default:
@@ -97,15 +98,6 @@ func validateComponents(cfg config.Config) error {
 		return fmt.Errorf("harness type %q requires its paired bridge, not %q", cfg.Harness.Type, cfg.Bridge.Type)
 	}
 	return nil
-}
-
-// toolathlonGatewayPort is the port the adapter will start the gateway on
-// for this profile.
-func toolathlonGatewayPort(cfg config.Config) int {
-	if settings := cfg.Benchmark.Toolathlon; settings != nil && settings.GatewayPort != 0 {
-		return settings.GatewayPort
-	}
-	return toolathlon.DefaultGatewayPort
 }
 
 // prepareBackend turns the profile's runtime block into the model the harness
@@ -285,37 +277,6 @@ func sweatlasModels(cfg config.Config) (judge core.ModelConfig, judgeDisabled bo
 		return core.ModelConfig{}, true
 	}
 	return judgeCfg.CoreModel(), false
-}
-
-// mcpServers is the harness's MCP client configuration, whichever harness
-// renders it: the benchmark's own server first, when the benchmark exposes
-// its tools that way (Toolathlon's gateway, at the sandbox's alias on the
-// gateway port), then the profile's harness.mcp entries.
-func mcpServers(cfg config.Config) []config.HarnessMCPServerConfig {
-	out := make([]config.HarnessMCPServerConfig, 0, len(cfg.Harness.MCP.Servers)+1)
-	if cfg.Benchmark.Type == "toolathlon" {
-		gateway := toolathlon.Gateway(dockersandbox.NetworkAlias, toolathlonGatewayPort(cfg))
-		out = append(out, config.HarnessMCPServerConfig{Name: gateway.Name, URL: gateway.URL, Transport: gateway.Transport, TimeoutSeconds: gateway.TimeoutSeconds})
-	}
-	return append(out, cfg.Harness.MCP.Servers...)
-}
-
-func hermesMCPServers(cfg config.Config) []hermesharness.MCPServer {
-	servers := mcpServers(cfg)
-	out := make([]hermesharness.MCPServer, 0, len(servers))
-	for _, server := range servers {
-		out = append(out, hermesharness.MCPServer{Name: server.Name, URL: server.URL, Transport: server.Transport, TimeoutSeconds: server.TimeoutSeconds})
-	}
-	return out
-}
-
-func openclawMCPServers(cfg config.Config) []openclawharness.MCPServer {
-	servers := mcpServers(cfg)
-	out := make([]openclawharness.MCPServer, 0, len(servers))
-	for _, server := range servers {
-		out = append(out, openclawharness.MCPServer{Name: server.Name, URL: server.URL, Transport: server.Transport, TimeoutSeconds: server.TimeoutSeconds})
-	}
-	return out
 }
 
 // environmentFromConfig converts a profile's benchmark.environment block into

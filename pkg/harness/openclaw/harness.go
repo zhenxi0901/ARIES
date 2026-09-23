@@ -23,18 +23,18 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
-	audioinput "github.com/hyscale-lab/aries/pkg/audio"
 	"github.com/hyscale-lab/aries/internal/harness"
+	audioinput "github.com/hyscale-lab/aries/pkg/audio"
 	"github.com/hyscale-lab/aries/pkg/containerimage"
 	"github.com/hyscale-lab/aries/pkg/core"
 	gatewayclient "github.com/hyscale-lab/aries/pkg/harness/openclaw/gateway"
 	realtimeclient "github.com/hyscale-lab/aries/pkg/harness/openclaw/realtime"
 	"github.com/hyscale-lab/aries/pkg/runner"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sirupsen/logrus"
 )
 
@@ -352,9 +352,10 @@ func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) 
 			extractEnabled = true
 		}
 	}
+	renderServers, clientServers := harness.Merge(manager.mcpServers, request.MCPServers)
 	var mcpClients []*harness.MCPClient
 	var mcpToolNames []string
-	for _, server := range manager.mcpServers {
+	for _, server := range clientServers {
 		client, err := harness.NewMCPClient(server)
 		if err != nil {
 			clear(extractAPIKey)
@@ -383,7 +384,7 @@ func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) 
 		}
 	}
 	configuration, err := renderConfig(request.Model, request.Endpoint, manager.mode, manager.webSearchEnabled, extractEnabled, manager.subagentsEnabled, manager.maxConcurrentSubagents, MCPOptions{
-		Servers:   manager.mcpServers,
+		Servers:   renderServers,
 		ToolNames: mcpToolNames,
 	})
 	if err != nil {

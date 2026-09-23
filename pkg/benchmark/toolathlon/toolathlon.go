@@ -54,6 +54,12 @@ const (
 	// DefaultGatewayPort is Toolathlon's own default for the MCP gateway.
 	DefaultGatewayPort = 10086
 
+	// defaultSandboxAlias is the name a task container answers to on its own
+	// network when the deployment does not say otherwise; it matches
+	// pkg/sandbox/docker.NetworkAlias, and Deep Research Bench's SearXNG is
+	// reached the same way.
+	defaultSandboxAlias = "task-sandbox"
+
 	// GatewayServerName is the name the gateway is registered under in the
 	// harness's MCP client configuration, so its tools reach the model as
 	// `mcp_toolathlon_<tool>` (or `mcp__toolathlon__<tool>`, by Hermes
@@ -111,30 +117,55 @@ const (
 	modelPlaceholderURL = "http://model-not-used-by-aries.invalid/v1"
 )
 
-// GatewayServer is the gateway described as the MCP server a harness
-// connects to: plain HTTP over SSE at the sandbox's alias on the gateway
-// port. The adapter derives it from the profile, so a profile does not
-// spell out an endpoint the adapter already fixes.
-type GatewayServer struct {
-	Name           string
-	URL            string
-	Transport      string
-	TimeoutSeconds int
-}
-
-// Gateway describes the gateway as reached from the harness, where host is
-// the sandbox's network alias and port the gateway port (zero for the
+// Gateway describes the gateway as one MCP server, where host is the address
+// the harness reaches the sandbox on and port the gateway port (zero for the
 // default). The gateway speaks no TLS, so the scheme is fixed to http.
-func Gateway(host string, port int) GatewayServer {
+func Gateway(host string, port int) core.MCPServer {
 	if port == 0 {
 		port = DefaultGatewayPort
 	}
-	return GatewayServer{
+	return core.MCPServer{
 		Name:           GatewayServerName,
 		URL:            fmt.Sprintf("http://%s/sse", net.JoinHostPort(host, strconv.Itoa(port))),
 		Transport:      "sse",
 		TimeoutSeconds: GatewayCallTimeoutSeconds,
 	}
+}
+
+// MCPServers is the runner.MCPServerProvider capability: every Toolathlon
+// tool reaches the agent through one gateway, which runs inside the task
+// sandbox and is started by PrepareSandbox. The harness is given the
+// sandbox's task-network address; ARIES's own client is given the host
+// address the sandbox published the gateway port on, when the deployment
+// publishes ports at all.
+func (b *Benchmark) MCPServers(ctx context.Context, _ core.Task, sandbox runner.Sandbox) ([]core.MCPServer, error) {
+	host := defaultSandboxAlias
+	addressing, ok := sandbox.(runner.SandboxAddressing)
+	if ok {
+		if alias := addressing.NetworkAlias(); alias != "" {
+			host = alias
+		}
+	}
+	server := Gateway(host, b.gatewayPort)
+	if ok {
+		published, err := addressing.PublishedAddress(ctx, b.gatewayPortOrDefault())
+		if err != nil {
+			// A deployment that publishes nothing is not an error: the
+			// harness still reaches the gateway, and ARIES's own client is
+			// simply not started for it.
+			return []core.MCPServer{server}, nil
+		}
+		server.ClientURL = fmt.Sprintf("http://%s/sse", published)
+	}
+	return []core.MCPServer{server}, nil
+}
+
+// gatewayPortOrDefault is the port the gateway actually listens on.
+func (b *Benchmark) gatewayPortOrDefault() int {
+	if b.gatewayPort == 0 {
+		return DefaultGatewayPort
+	}
+	return b.gatewayPort
 }
 
 // Options selects tasks from one pinned Toolathlon checkout.
@@ -484,6 +515,13 @@ func New(options Options) (*Benchmark, error) {
 	// and the loopback forwarder's path to the Docker host both need a
 	// non-internal network, so the policy is fixed rather than configurable.
 	environment.AllowNetwork = true
+	// The gateway is the harness's tool endpoint and ARIES's own MCP client
+	// connects to it as well, from the host, so its port is published.
+	gatewayPort := options.GatewayPort
+	if gatewayPort == 0 {
+		gatewayPort = DefaultGatewayPort
+	}
+	environment.PublishPorts = []int{gatewayPort}
 
 	return &Benchmark{
 		root:             filepath.Clean(options.Root),

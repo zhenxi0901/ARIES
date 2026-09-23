@@ -910,4 +910,3 @@ func TestHarnessMCPServerConfigValidation(t *testing.T) {
 		}
 	}
 }
-

@@ -143,8 +143,9 @@ type BenchmarkConfig struct {
 // ToolathlonConfig tunes the Toolathlon adapter (see BenchmarkConfig). All
 // fields are optional; the adapter's defaults are Toolathlon's own.
 type ToolathlonConfig struct {
-	// GatewayPort is the in-sandbox port of Toolathlon's MCP gateway; the
-	// harness's MCP client is pointed at it by the adapter.
+	// GatewayPort is the in-sandbox port of Toolathlon's MCP gateway. The
+	// adapter points the harness's MCP client at it, and publishes it so
+	// ARIES's own client can reach the same gateway from the host.
 	GatewayPort int `json:"gateway_port,omitempty"`
 	// AppHost is where the self-hosted applications (Canvas, poste.io,
 	// WooCommerce) listen as seen from the Docker host; empty means the
@@ -242,7 +243,6 @@ type HarnessConfig struct {
 	// configured and mean nothing to another harness. Such escape hatches go
 	// under this type-specific block rather than onto the shared fields.
 	Hermes *HarnessHermesConfig `json:"hermes,omitempty"`
-	MCP    HarnessMCPConfig     `json:"mcp,omitempty"`
 }
 
 // HarnessHermesConfig is the harness.hermes block. It is valid only with
@@ -313,23 +313,6 @@ func findCredentialField(value any, path string) string {
 		}
 	}
 	return ""
-}
-
-// HarnessMCPConfig is an OpenClaw/Hermes concept (see (*HarnessConfig).validate):
-// remote MCP servers the harness connects to at startup, beyond any the
-// benchmark provides. A benchmark whose tools are an MCP server inside the
-// task sandbox (Toolathlon's gateway) is added to the client by wiring, not
-// by the profile, and its name is reserved.
-type HarnessMCPConfig struct {
-	Servers []HarnessMCPServerConfig `json:"servers,omitempty"`
-}
-
-type HarnessMCPServerConfig struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
-	// Transport is "sse" or "streamable-http"; empty means streamable-http.
-	Transport      string `json:"transport,omitempty"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
 
 // HarnessWebSearchConfig is an OpenClaw/Hermes-only concept (see

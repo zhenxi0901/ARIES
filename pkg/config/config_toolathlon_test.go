@@ -18,26 +18,29 @@ func toolathlonConfig(harness string) string {
 }
 
 // hermesWithMCP names one MCP server of the profile's own; Toolathlon's
-// gateway is not a profile matter (see cmd/aries wiring).
-const hermesWithMCP = `"harness":{"type":"hermes","mcp":{"servers":[{"name":"docs","url":"https://docs.example/mcp","transport":"sse","timeout_seconds":300}]}}`
+// gateway is not a profile matter -- the adapter hands it to the harness once
+// the sandbox is up (pkg/benchmark/toolathlon, MCPServers).
+const hermesWithMCP = `"harness":{"type":"hermes","mcp_servers":[{"name":"docs","url":"https://docs.example/mcp","transport":"sse","timeout_seconds":300}]}`
 
 func TestHarnessMCPServersDecodeAndDefaultTransport(t *testing.T) {
 	cfg, err := Decode(strings.NewReader(toolathlonConfig(hermesWithMCP)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	servers := cfg.Harness.MCP.Servers
+	servers := cfg.Harness.MCPServers
 	if len(servers) != 1 || servers[0].Name != "docs" || servers[0].Transport != "sse" || servers[0].TimeoutSeconds != 300 {
 		t.Fatalf("mcp servers = %#v", servers)
 	}
 
+	// A server that names no transport keeps the harness's own default, so
+	// the profile is not rewritten behind the author's back.
 	defaulted := strings.Replace(hermesWithMCP, `,"transport":"sse"`, ``, 1)
 	cfg, err = Decode(strings.NewReader(toolathlonConfig(defaulted)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Harness.MCP.Servers[0].Transport != "streamable-http" {
-		t.Fatalf("transport = %q, want streamable-http default", cfg.Harness.MCP.Servers[0].Transport)
+	if cfg.Harness.MCPServers[0].Transport != "" {
+		t.Fatalf("transport = %q, want it left to the harness", cfg.Harness.MCPServers[0].Transport)
 	}
 }
 
@@ -48,27 +51,35 @@ func TestHarnessMCPServersValidation(t *testing.T) {
 	}{
 		"other harness": {
 			harness: strings.Replace(hermesWithMCP, `"type":"hermes"`, `"type":"other"`, 1),
-			wantErr: "harness.mcp requires OpenClaw or Hermes",
+			wantErr: "harness.mcp_servers requires OpenClaw or Hermes",
 		},
 		"bad name": {
-			harness: strings.Replace(hermesWithMCP, `"name":"docs"`, `"name":"Docs-MCP"`, 1),
-			wantErr: "name must be a lowercase identifier",
+			harness: strings.Replace(hermesWithMCP, `"name":"docs"`, `"name":"docs mcp"`, 1),
+			wantErr: "contains invalid characters",
 		},
 		"bad url": {
 			harness: strings.Replace(hermesWithMCP, `"url":"https://docs.example/mcp"`, `"url":"docs.example/mcp"`, 1),
-			wantErr: "url must be an absolute HTTP(S) URL",
+			wantErr: "url must be absolute HTTP(S)",
+		},
+		"url with credentials": {
+			harness: strings.Replace(hermesWithMCP, `"url":"https://docs.example/mcp"`, `"url":"https://user:pw@docs.example/mcp"`, 1),
+			wantErr: "must not contain credentials",
 		},
 		"bad transport": {
 			harness: strings.Replace(hermesWithMCP, `"transport":"sse"`, `"transport":"stdio"`, 1),
 			wantErr: "transport must be sse or streamable-http",
 		},
+		"transport without a url": {
+			harness: `"harness":{"type":"hermes","mcp_servers":[{"name":"local","command":"mcp-server","transport":"sse"}]}`,
+			wantErr: "transport applies to a url server only",
+		},
 		"negative timeout": {
 			harness: strings.Replace(hermesWithMCP, `"timeout_seconds":300`, `"timeout_seconds":-1`, 1),
-			wantErr: "timeout_seconds must not be negative",
+			wantErr: "timeout must not be negative",
 		},
 		"duplicate name": {
-			harness: strings.Replace(hermesWithMCP, `}]}}`, `},{"name":"docs","url":"https://docs.example/other"}]}}`, 1),
-			wantErr: "is duplicated",
+			harness: strings.Replace(hermesWithMCP, `}]}`, `},{"name":"docs","url":"https://docs.example/other"}]}`, 1),
+			wantErr: "duplicate MCP server name",
 		},
 	}
 	for name, testCase := range cases {

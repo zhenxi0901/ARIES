@@ -277,12 +277,16 @@ Tasks with neither run at any concurrency. Isolating application state per
 occurrence would need one deployment per sandbox (Toolathlon's instance
 prefixes) and per-occurrence ports, which the adapter does not manage.
 
-The gateway needs no `harness.mcp` entry: the adapter registers it
-with the harness as `toolathlon` (SSE at `task-sandbox` on `gateway_port`,
-with a per-call timeout above every backend timeout in Toolathlon's own
-server configuration files, so Toolathlon's timeouts are the ones that fire). A
-`harness.mcp.servers` block, if present, adds servers of your own and may
-not reuse the name `toolathlon`.
+The gateway needs no `harness.mcp_servers` entry: once the sandbox is
+prepared, the adapter hands the harness a server named `toolathlon` (SSE at
+`task-sandbox` on `gateway_port`, with a per-call timeout above every backend
+timeout in Toolathlon's own server configuration files, so Toolathlon's
+timeouts are the ones that fire). The same port is published on the host's
+loopback address, and ARIES's own MCP client uses that address to discover the
+gateway's tools, which is what names them in OpenClaw's sandbox gate; if the
+deployment publishes no ports, the harness still reaches the gateway and the
+gate falls back to allowing `bundle-mcp`. A `harness.mcp_servers` block, if
+present, adds servers of your own and may not reuse the name `toolathlon`.
 
 ## Artifacts
 

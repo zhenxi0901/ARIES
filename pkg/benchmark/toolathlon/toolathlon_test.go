@@ -3,6 +3,7 @@ package toolathlon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -739,5 +740,111 @@ func TestWriteCredentialsArchiveOverlaysConfigs(t *testing.T) {
 	}
 	if err := writeCredentialsArchive(dir, archive); err == nil || !strings.Contains(err.Error(), "neither a regular file nor a directory") {
 		t.Fatalf("symlink: err = %v", err)
+	}
+}
+
+// addressedSandbox is a sandbox that answers the optional
+// runner.SandboxAddressing capability: an alias on the task network and,
+// when the port was published, a host address for it.
+type addressedSandbox struct {
+	alias     string
+	published map[int]string
+	err       error
+}
+
+func (s addressedSandbox) Exec(context.Context, core.Command) (core.CommandResult, error) {
+	return core.CommandResult{}, nil
+}
+func (s addressedSandbox) Upload(context.Context, string, string) error   { return nil }
+func (s addressedSandbox) Download(context.Context, string, string) error { return nil }
+func (s addressedSandbox) NetworkAlias() string                           { return s.alias }
+func (s addressedSandbox) PublishedAddress(_ context.Context, port int) (string, error) {
+	if s.err != nil {
+		return "", s.err
+	}
+	address, ok := s.published[port]
+	if !ok {
+		return "", fmt.Errorf("port %d is not published", port)
+	}
+	return address, nil
+}
+
+// plainSandbox has only the three verbs every sandbox has.
+type plainSandbox struct{}
+
+func (plainSandbox) Exec(context.Context, core.Command) (core.CommandResult, error) {
+	return core.CommandResult{}, nil
+}
+func (plainSandbox) Upload(context.Context, string, string) error   { return nil }
+func (plainSandbox) Download(context.Context, string, string) error { return nil }
+
+// The gateway is the benchmark's own MCP server: the harness is given the
+// task-network address, and ARIES's client the published one. A deployment
+// that publishes nothing still leaves the harness a usable entry.
+func TestMCPServersDescribesTheGatewayForBothClients(t *testing.T) {
+	root := writeFixture(t)
+	options := baseOptions(t, root)
+	options.GatewayPort = 10086
+	benchmark, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := core.Task{ID: "canvas-list-test"}
+
+	servers, err := benchmark.MCPServers(context.Background(), task, addressedSandbox{
+		alias:     "task-sandbox",
+		published: map[int]string{10086: "127.0.0.1:49173"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("servers = %#v", servers)
+	}
+	server := servers[0]
+	if server.Name != GatewayServerName || server.Transport != "sse" || server.TimeoutSeconds != GatewayCallTimeoutSeconds {
+		t.Fatalf("server = %#v", server)
+	}
+	if server.URL != "http://task-sandbox:10086/sse" {
+		t.Fatalf("harness URL = %q", server.URL)
+	}
+	if server.ClientURL != "http://127.0.0.1:49173/sse" {
+		t.Fatalf("client URL = %q", server.ClientURL)
+	}
+
+	// Nothing published: the harness entry stands, ARIES starts no client.
+	servers, err = benchmark.MCPServers(context.Background(), task, addressedSandbox{alias: "task-sandbox"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0].ClientURL != "" || servers[0].URL != "http://task-sandbox:10086/sse" {
+		t.Fatalf("unpublished: servers = %#v", servers)
+	}
+
+	// A sandbox without the capability keeps the default alias.
+	servers, err = benchmark.MCPServers(context.Background(), task, plainSandbox{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0].URL != "http://task-sandbox:10086/sse" || servers[0].ClientURL != "" {
+		t.Fatalf("plain sandbox: servers = %#v", servers)
+	}
+}
+
+// The gateway port is published, so ARIES can reach it from the host.
+func TestTasksPublishTheGatewayPort(t *testing.T) {
+	root := writeFixture(t)
+	options := baseOptions(t, root)
+	options.GatewayPort = 20086
+	benchmark, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := benchmark.Tasks(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || !slices.Equal(tasks[0].Environment.PublishPorts, []int{20086}) {
+		t.Fatalf("publish ports = %#v", tasks[0].Environment.PublishPorts)
 	}
 }

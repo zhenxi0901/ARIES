@@ -54,11 +54,12 @@ type openClawMCP struct {
 }
 
 type openClawMCPServer struct {
-	Command   string            `json:"command,omitempty"`
-	Args      []string          `json:"args,omitempty"`
-	URL       string            `json:"url,omitempty"`
-	Transport string            `json:"transport,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
+	Command          string            `json:"command,omitempty"`
+	Args             []string          `json:"args,omitempty"`
+	URL              string            `json:"url,omitempty"`
+	Transport        string            `json:"transport,omitempty"`
+	RequestTimeoutMs int               `json:"requestTimeoutMs,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
 }
 
 // MCPOptions configures MCP servers and sandbox-allowlisted tools for OpenClaw.
@@ -277,8 +278,17 @@ func renderConfig(model core.ModelConfig, endpoint core.ToolEndpoint, mode strin
 				if server.Command != "" {
 					entry.Transport = "stdio"
 				} else if server.URL != "" {
-					entry.Transport = "sse"
+					// OpenClaw needs the key; SSE is both the assumption here
+					// before transports were configurable and what a
+					// benchmark's in-sandbox gateway speaks.
+					entry.Transport = server.Transport
+					if entry.Transport == "" {
+						entry.Transport = "sse"
+					}
 				}
+				// OpenClaw's timeout for a tool call is per request and in
+				// milliseconds.
+				entry.RequestTimeoutMs = server.TimeoutSeconds * 1000
 				servers[server.Name] = entry
 			}
 			configuration.MCP = &openClawMCP{Servers: servers}
@@ -287,6 +297,13 @@ func renderConfig(model core.ModelConfig, endpoint core.ToolEndpoint, mode strin
 			if strings.TrimSpace(toolName) != "" && !slices.Contains(alsoAllow, toolName) {
 				alsoAllow = append(alsoAllow, toolName)
 			}
+		}
+		// A sandboxed session sees only the tools this gate names, so an MCP
+		// server whose tools ARIES could not discover would be invisible to
+		// the agent: the plugin that owns every MCP tool is the fallback
+		// (docs/benchmarks/toolathlon.md).
+		if len(opts.Servers) > 0 && len(opts.ToolNames) == 0 {
+			alsoAllow = append(alsoAllow, "bundle-mcp")
 		}
 	}
 	if len(alsoAllow) > 0 {
@@ -300,45 +317,6 @@ func renderConfig(model core.ModelConfig, endpoint core.ToolEndpoint, mode strin
 		return nil, fmt.Errorf("encode OpenClaw config: %w", err)
 	}
 	return output.Bytes(), nil
-}
-
-// validateMCPServer mirrors the Hermes harness's rule for the same block:
-// a lowercase identifier for the name, an absolute HTTP(S) URL without
-// credentials, query or fragment, one of the two transports, and a
-// non-negative timeout.
-func validateMCPServer(server MCPServer) error {
-	if !validMCPServerName(server.Name) {
-		return fmt.Errorf("OpenClaw MCP server name %q must be a lowercase identifier", server.Name)
-	}
-	parsed, err := url.Parse(server.URL)
-	if err != nil || parsed.Host == "" || parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("OpenClaw MCP server %q URL must be absolute HTTP(S)", server.Name)
-	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("OpenClaw MCP server %q URL must not contain credentials, query, or fragment", server.Name)
-	}
-	switch server.Transport {
-	case "sse", "streamable-http":
-	default:
-		return fmt.Errorf("OpenClaw MCP server %q transport must be sse or streamable-http", server.Name)
-	}
-	if server.TimeoutSeconds < 0 {
-		return fmt.Errorf("OpenClaw MCP server %q timeout must not be negative", server.Name)
-	}
-	return nil
-}
-
-func validMCPServerName(name string) bool {
-	if name == "" || len(name) > 64 {
-		return false
-	}
-	for index, character := range name {
-		if character >= 'a' && character <= 'z' || index > 0 && (character >= '0' && character <= '9' || character == '_') {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 func denyToolList(subagentsEnabled bool) []string {
