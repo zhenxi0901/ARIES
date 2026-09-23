@@ -214,6 +214,14 @@ func (r *Runner) runTask(ctx context.Context, task core.Task) (core.TaskResult, 
 		return finish()
 	}
 
+	// The benchmark's own MCP servers are known only once its sandbox is
+	// prepared, because their address is the sandbox's.
+	taskMCPServers, mcpErr := benchmarkMCPServers(ctx, r.benchmark, task, sandbox)
+	if mcpErr != nil {
+		allErrors = append(allErrors, fmt.Errorf("collect benchmark MCP servers: %w", mcpErr))
+		return finish()
+	}
+
 	endpoint, err := r.bridge.Start(ctx, sandbox)
 	// Start may fail after allocating task-local resources or after its internal
 	// rollback fails. Stop is idempotent, so every Start attempt must be followed
@@ -226,14 +234,15 @@ func (r *Runner) runTask(ctx context.Context, task core.Task) (core.TaskResult, 
 	result.ToolLogPaths = append([]string(nil), endpoint.LogPaths...)
 
 	err = r.harness.Start(ctx, core.HarnessRequest{
-		RunID:     r.runID,
-		TaskID:    task.ID,
-		Endpoint:  endpoint,
-		Model:     r.model,
-		Timeout:   harnessTimeout,
-		CPU:       harnessCPU,
-		MemoryMB:  harnessMemory,
-		OutputDir: r.outputDir,
+		RunID:      r.runID,
+		TaskID:     task.ID,
+		Endpoint:   endpoint,
+		Model:      r.model,
+		Timeout:    harnessTimeout,
+		CPU:        harnessCPU,
+		MemoryMB:   harnessMemory,
+		OutputDir:  r.outputDir,
+		MCPServers: taskMCPServers,
 	})
 	// Start may fail after allocating task-local resources. Stop is idempotent,
 	// so every Start attempt must be followed by a positive stop confirmation
@@ -366,6 +375,20 @@ func newTaskResult(taskID string) core.TaskResult {
 		Observer:   core.ObserverResult{Status: core.StatusNotEnabled},
 		Cleanup:    core.CleanupResult{Status: core.StatusNotNeeded},
 	}
+}
+
+// benchmarkMCPServers asks a benchmark for the MCP servers its prepared
+// sandbox serves. A benchmark without the optional capability has none.
+func benchmarkMCPServers(ctx context.Context, benchmark Benchmark, task core.Task, sandbox Sandbox) ([]core.MCPServer, error) {
+	provider, ok := benchmark.(MCPServerProvider)
+	if !ok {
+		return nil, nil
+	}
+	servers, err := provider.MCPServers(ctx, task, sandbox)
+	if err != nil {
+		return nil, err
+	}
+	return servers, nil
 }
 
 func failureStatus(err error) string {

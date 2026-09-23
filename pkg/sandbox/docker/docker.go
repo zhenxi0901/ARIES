@@ -11,6 +11,8 @@ import (
 	"io"
 	"maps"
 	"math"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -275,6 +277,24 @@ func containerOptions(request core.SandboxRequest, sandbox *Sandbox, labels map[
 		Resources:   resources,
 		Init:        boolPointer(true),
 	}
+	// A benchmark that serves a port itself (Toolathlon's MCP gateway) needs
+	// it reachable from the host, where ARIES runs: the task network is the
+	// harness's path to it, not ARIES's. Each port is published on loopback
+	// with a host port Docker assigns, so nothing of the task is reachable
+	// from outside this machine and two occurrences never collide.
+	var exposed network.PortSet
+	if len(environment.PublishPorts) > 0 {
+		exposed = make(network.PortSet, len(environment.PublishPorts))
+		host.PortBindings = make(network.PortMap, len(environment.PublishPorts))
+		for _, port := range environment.PublishPorts {
+			parsed, err := network.ParsePort(strconv.Itoa(port) + "/tcp")
+			if err != nil {
+				continue
+			}
+			exposed[parsed] = struct{}{}
+			host.PortBindings[parsed] = []network.PortBinding{{HostIP: loopbackHost}}
+		}
+	}
 	if environment.ExecUser != "" {
 		host.SecurityOpt = []string{"no-new-privileges=true"}
 	}
@@ -286,6 +306,7 @@ func containerOptions(request core.SandboxRequest, sandbox *Sandbox, labels map[
 		Config: &container.Config{
 			Image: environment.Image, WorkingDir: environment.Workdir, Env: taskDockerEnvironment(environment.Env),
 			Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"}, Labels: labels,
+			ExposedPorts: exposed,
 		},
 		HostConfig: host,
 		NetworkingConfig: &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{
@@ -295,6 +316,44 @@ func containerOptions(request core.SandboxRequest, sandbox *Sandbox, labels map[
 }
 
 func boolPointer(value bool) *bool { return &value }
+
+// loopbackHost keeps every published port on this machine: a task's port is
+// for ARIES, not for the network the VM sits on.
+var loopbackHost = netip.MustParseAddr("127.0.0.1")
+
+// NetworkAlias is half of the runner.SandboxAddressing capability: every task
+// container answers to the same name on its own network, so a harness
+// configuration can name it before the container exists.
+func (s *Sandbox) NetworkAlias() string { return NetworkAlias }
+
+// PublishedAddress is the other half: the host address Docker bound a
+// published container port to. The port must have been declared in
+// core.Environment.PublishPorts, or nothing was published for it.
+func (s *Sandbox) PublishedAddress(ctx context.Context, containerPort int) (string, error) {
+	parsed, err := network.ParsePort(strconv.Itoa(containerPort) + "/tcp")
+	if err != nil {
+		return "", fmt.Errorf("published address for port %d: %w", containerPort, err)
+	}
+	inspection, err := s.client.ContainerInspect(ctx, s.containerID, client.ContainerInspectOptions{})
+	if err != nil {
+		return "", fmt.Errorf("inspect docker task container for published port %d: %w", containerPort, err)
+	}
+	c := inspection.Container
+	if c.NetworkSettings == nil {
+		return "", fmt.Errorf("port %d is not published", containerPort)
+	}
+	for _, binding := range c.NetworkSettings.Ports[parsed] {
+		if binding.HostPort == "" {
+			continue
+		}
+		host := binding.HostIP.String()
+		if !binding.HostIP.IsValid() || binding.HostIP.IsUnspecified() {
+			host = loopbackHost.String()
+		}
+		return net.JoinHostPort(host, binding.HostPort), nil
+	}
+	return "", fmt.Errorf("port %d is not published", containerPort)
+}
 
 func (s *Sandbox) verifyLive(ctx context.Context) error {
 	inspection, err := s.client.ContainerInspect(ctx, s.containerID, client.ContainerInspectOptions{})

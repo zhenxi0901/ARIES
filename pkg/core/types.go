@@ -21,6 +21,25 @@ type Environment struct {
 	AllowNetwork bool              `json:"allow_network"`
 	Env          map[string]string `json:"env,omitempty"`
 	ExecUser     string            `json:"-"`
+	// PublishPorts are container ports the benchmark serves itself and needs
+	// reachable from the host, where ARIES runs: a deployment that supports
+	// it publishes each on loopback and reports the address through
+	// runner.SandboxAddressing. A benchmark that names none is unaffected.
+	PublishPorts []int `json:"publish_ports,omitempty"`
+}
+
+// MCPServer is one Model Context Protocol server a benchmark serves from its
+// own task sandbox, for the harness to use as tools. URL is the address
+// inside the task's network, which is what the harness container is
+// configured with; ClientURL, when set, is the same server as reached from
+// the host, which is what ARIES's own client connects to. A server with no
+// ClientURL is configured for the harness alone.
+type MCPServer struct {
+	Name           string `json:"name"`
+	URL            string `json:"url"`
+	ClientURL      string `json:"client_url,omitempty"`
+	Transport      string `json:"transport,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
 
 // SandboxRequest carries stable run and task identity separately from the
@@ -121,6 +140,9 @@ type HarnessRequest struct {
 	CPU       *float64      `json:"cpu,omitempty"`
 	MemoryMB  *int          `json:"memory_mb,omitempty"`
 	OutputDir string        `json:"output_dir"`
+	// MCPServers are the servers the benchmark exposes for this task, in
+	// addition to any the profile configures.
+	MCPServers []MCPServer `json:"mcp_servers,omitempty"`
 }
 
 const (

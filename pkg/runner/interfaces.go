@@ -55,6 +55,26 @@ type StreamExecutor interface {
 	ExecStream(ctx context.Context, command core.Command, stdin io.Reader, stdout, stderr io.Writer) (core.CommandResult, error)
 }
 
+// SandboxAddressing is an optional sandbox capability: how a port the sandbox
+// itself serves is addressed by the harness container, which shares the task's
+// network (NetworkAlias), and by the ARIES process on the host
+// (PublishedAddress), which does not. PublishedAddress answers only for ports
+// the benchmark declared in core.Environment.PublishPorts. Docker answers with
+// its network alias and a loopback host port; a Kubernetes deployment answers
+// with a Service name and its own published address.
+type SandboxAddressing interface {
+	NetworkAlias() string
+	PublishedAddress(ctx context.Context, containerPort int) (string, error)
+}
+
+// MCPServerProvider is an optional benchmark capability: the MCP servers the
+// prepared sandbox serves for this task. The runner collects them after
+// PrepareSandbox and hands them to the harness, so a benchmark whose tools are
+// an MCP server inside its own sandbox needs no wiring of its own.
+type MCPServerProvider interface {
+	MCPServers(ctx context.Context, task core.Task, sandbox Sandbox) ([]core.MCPServer, error)
+}
+
 // ToolBridge grants and then positively revokes harness access to a sandbox.
 // A nil Stop error is the positive revocation confirmation.
 type ToolBridge interface {

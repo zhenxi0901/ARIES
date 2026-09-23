@@ -9,8 +9,10 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
+	"github.com/hyscale-lab/aries/pkg/core"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -21,6 +23,15 @@ type MCPServerConfig struct {
 	Args    []string          `json:"args,omitempty"`
 	URL     string            `json:"url,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+	// Transport selects how a url server is reached: "sse" or
+	// "streamable-http". Empty keeps each harness's own default, which is
+	// streamable-http for both; a server that speaks only SSE (Toolathlon's
+	// tool gateway) must say so.
+	Transport string `json:"transport,omitempty"`
+	// TimeoutSeconds is the per-tool-call timeout for this server. Zero keeps
+	// the harness default, which is short enough that a benchmark's own tools
+	// -- a mailbox search, a repository clone -- can exceed it.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 }
 
 // ValidateMCPServer verifies that an MCP server configuration specifies a valid name
@@ -65,9 +76,51 @@ func ValidateMCPServer(cfg MCPServerConfig) error {
 		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 			return fmt.Errorf("MCP server %q url must be absolute HTTP(S)", name)
 		}
+		if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("MCP server %q url must not contain credentials, query, or fragment", name)
+		}
+	}
+
+	switch cfg.Transport {
+	case "", "sse", "streamable-http":
+	default:
+		return fmt.Errorf("MCP server %q transport must be sse or streamable-http", name)
+	}
+	if cfg.Transport != "" && !hasURL {
+		return fmt.Errorf("MCP server %q transport applies to a url server only", name)
+	}
+	if cfg.TimeoutSeconds < 0 {
+		return fmt.Errorf("MCP server %q timeout must not be negative", name)
 	}
 
 	return nil
+}
+
+// Merge combines the MCP servers a profile configures with the ones a
+// benchmark serves from its own task sandbox. Two lists come out because the
+// two clients are in different places: the harness runs beside the sandbox and
+// uses a server's task-network address, while ARIES runs on the host and uses
+// the address the sandbox published. A benchmark server with no ClientURL has
+// no host address, so ARIES starts no client for it and the harness still
+// gets it.
+func Merge(configured []MCPServerConfig, provided []core.MCPServer) (render, clients []MCPServerConfig) {
+	render = append(render, configured...)
+	clients = append(clients, configured...)
+	for _, server := range provided {
+		entry := MCPServerConfig{
+			Name:           server.Name,
+			URL:            server.URL,
+			Transport:      server.Transport,
+			TimeoutSeconds: server.TimeoutSeconds,
+		}
+		render = append(render, entry)
+		if server.ClientURL != "" {
+			client := entry
+			client.URL = server.ClientURL
+			clients = append(clients, client)
+		}
+	}
+	return render, clients
 }
 
 // MCPClient manages the live session and lifecycle of an MCP client adapter.
@@ -97,7 +150,14 @@ func NewMCPClient(cfg MCPServerConfig) (*MCPClient, error) {
 		}
 		transport = &mcp.CommandTransport{Command: cmd}
 	} else if cfg.URL != "" {
-		transport = &mcp.SSEClientTransport{Endpoint: cfg.URL}
+		// The transport the harness is told to use is also the one ARIES's
+		// own client uses, so a server is reached the same way from both
+		// sides.
+		if cfg.Transport == "sse" {
+			transport = &mcp.SSEClientTransport{Endpoint: cfg.URL}
+		} else {
+			transport = &mcp.StreamableClientTransport{Endpoint: cfg.URL}
+		}
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{
@@ -196,6 +256,11 @@ func (m *MCPClient) CallTool(ctx context.Context, name string, arguments map[str
 
 	if session == nil {
 		return nil, errors.New("MCP client session is not active")
+	}
+	if m.cfg.TimeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(m.cfg.TimeoutSeconds)*time.Second)
+		defer cancel()
 	}
 
 	params := &mcp.CallToolParams{

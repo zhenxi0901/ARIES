@@ -1039,3 +1039,27 @@ func readArchive(t *testing.T, content []byte) (*tar.Header, []byte) {
 	}
 	return header, payload
 }
+
+// A benchmark that serves a port itself gets it published on loopback, with
+// the host port left to Docker so two occurrences never collide.
+func TestContainerOptionsPublishesDeclaredPortsOnLoopback(t *testing.T) {
+	request := testRequest()
+	sandbox := &Sandbox{containerName: "task", networkName: "network"}
+	if got := containerOptions(request, sandbox, nil); got.Config.ExposedPorts != nil || got.HostConfig.PortBindings != nil {
+		t.Fatalf("nothing declared, but ports = %v / %v", got.Config.ExposedPorts, got.HostConfig.PortBindings)
+	}
+
+	request.Environment.PublishPorts = []int{10086}
+	options := containerOptions(request, sandbox, nil)
+	port, err := network.ParsePort("10086/tcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := options.Config.ExposedPorts[port]; !ok {
+		t.Fatalf("exposed ports = %v", options.Config.ExposedPorts)
+	}
+	bindings := options.HostConfig.PortBindings[port]
+	if len(bindings) != 1 || bindings[0].HostIP.String() != "127.0.0.1" || bindings[0].HostPort != "" {
+		t.Fatalf("bindings = %#v", bindings)
+	}
+}
