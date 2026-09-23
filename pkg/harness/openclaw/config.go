@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/hyscale-lab/aries/internal/harness"
 	"github.com/hyscale-lab/aries/pkg/core"
 )
 
@@ -54,17 +53,15 @@ type openClawMCP struct {
 }
 
 type openClawMCPServer struct {
-	Command   string            `json:"command,omitempty"`
-	Args      []string          `json:"args,omitempty"`
-	URL       string            `json:"url,omitempty"`
-	Transport string            `json:"transport,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
+	Command   string   `json:"command,omitempty"`
+	Args      []string `json:"args,omitempty"`
+	URL       string   `json:"url,omitempty"`
+	Transport string   `json:"transport,omitempty"`
 }
 
 // MCPOptions configures MCP servers and sandbox-allowlisted tools for OpenClaw.
 type MCPOptions struct {
-	Servers   []harness.MCPServerConfig
-	ToolNames []string
+	Servers []core.MCPServerConfig
 }
 
 type talkConfig struct {
@@ -272,7 +269,6 @@ func renderConfig(model core.ModelConfig, endpoint core.ToolEndpoint, mode strin
 					Command: server.Command,
 					Args:    server.Args,
 					URL:     server.URL,
-					Env:     server.Env,
 				}
 				if server.Command != "" {
 					entry.Transport = "stdio"
@@ -282,10 +278,8 @@ func renderConfig(model core.ModelConfig, endpoint core.ToolEndpoint, mode strin
 				servers[server.Name] = entry
 			}
 			configuration.MCP = &openClawMCP{Servers: servers}
-		}
-		for _, toolName := range opts.ToolNames {
-			if strings.TrimSpace(toolName) != "" && !slices.Contains(alsoAllow, toolName) {
-				alsoAllow = append(alsoAllow, toolName)
+			if !slices.Contains(alsoAllow, "bundle-mcp") {
+				alsoAllow = append(alsoAllow, "bundle-mcp")
 			}
 		}
 	}

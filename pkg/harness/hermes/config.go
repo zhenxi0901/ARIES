@@ -12,7 +12,6 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/hyscale-lab/aries/internal/harness"
 	"github.com/hyscale-lab/aries/pkg/core"
 )
 
@@ -81,7 +80,7 @@ type renderSettings struct {
 	maxConcurrentSubagents int
 	compaction             *CompactionSettings
 	extraBody              []byte
-	mcpServers             []harness.MCPServerConfig
+	mcpServers             []core.MCPServerConfig
 }
 
 // renderConfig produces the Hermes `config.yaml`. The credential is written as

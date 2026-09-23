@@ -22,11 +22,9 @@ import (
 
 	"github.com/containerd/errdefs"
 	audioinput "github.com/hyscale-lab/aries/pkg/audio"
-	"github.com/hyscale-lab/aries/internal/harness"
 	"github.com/hyscale-lab/aries/pkg/containerimage"
 	"github.com/hyscale-lab/aries/pkg/core"
 	"github.com/hyscale-lab/aries/pkg/runner"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
@@ -116,7 +114,7 @@ type Options struct {
 	// renderConfig). Nil keeps Hermes's own defaults.
 	Compaction *CompactionSettings
 	ExtraBody  []byte
-	MCPServers []harness.MCPServerConfig
+	MCPServers []core.MCPServerConfig
 	Logger     *logrus.Logger
 }
 
@@ -177,7 +175,7 @@ type Manager struct {
 	maxConcurrentSubagents int
 	compaction             *CompactionSettings
 	extraBody              []byte
-	mcpServers             []harness.MCPServerConfig
+	mcpServers             []core.MCPServerConfig
 	logger                 *logrus.Logger
 	apiKeyLookup           func(string) ([]byte, bool)
 	newSpeech              func(audioinput.SpeechClientOptions) (speechSynthesizer, error)
@@ -205,7 +203,6 @@ type session struct {
 	apiKey        []byte
 	extractAPIKey []byte
 	voiceAPIKey   []byte
-	mcpClients    []*harness.MCPClient
 	runAttempted  bool
 	logPaths      []string
 }
@@ -312,7 +309,7 @@ func New(options Options) (*Manager, error) {
 		return nil, errors.New("Hermes mode must be agent or voice-transcribe")
 	}
 	for _, server := range options.MCPServers {
-		if err := harness.ValidateMCPServer(server); err != nil {
+		if err := core.ValidateMCPServer(server); err != nil {
 			return nil, fmt.Errorf("Hermes MCP server: %w", err)
 		}
 	}
@@ -324,17 +321,9 @@ func New(options Options) (*Manager, error) {
 		extractAPIKeyEnv: options.ExtractAPIKeyEnv, logger: options.Logger,
 		subagentsEnabled: options.SubagentsEnabled, maxConcurrentSubagents: options.MaxConcurrentSubagents,
 		compaction: options.Compaction, extraBody: bytes.Clone(options.ExtraBody),
-		mcpServers:   append([]harness.MCPServerConfig(nil), options.MCPServers...),
+		mcpServers:   append([]core.MCPServerConfig(nil), options.MCPServers...),
 		apiKeyLookup: options.APIKeyLookup, newSpeech: newSpeechClient, newID: randomID,
 	}, nil
-}
-
-// MCPServers returns a copy of the configured MCP servers on the manager.
-func (manager *Manager) MCPServers() []harness.MCPServerConfig {
-	if manager == nil {
-		return nil
-	}
-	return append([]harness.MCPServerConfig(nil), manager.mcpServers...)
 }
 
 func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) error {
@@ -366,29 +355,12 @@ func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) 
 		voiceSTT = &manager.voiceTranscribe.STT
 	}
 
-	var mcpClients []*harness.MCPClient
-	for _, server := range manager.mcpServers {
-		client, err := harness.NewMCPClient(server)
-		if err != nil {
-			return fmt.Errorf("Hermes initialize MCP server %q: %w", server.Name, err)
-		}
-		if err := client.Start(ctx); err != nil {
-			for _, c := range mcpClients {
-				_ = c.Stop()
-			}
-			return fmt.Errorf("Hermes start MCP server %q: %w", server.Name, err)
-		}
-		mcpClients = append(mcpClients, client)
-	}
 	configuration, err := renderConfig(request.Model, renderSettings{
 		maxTurns: manager.maxTurns, webSearchEnabled: manager.webSearchEnabled, extractEnabled: extractEnabled,
 		subagentsEnabled: manager.subagentsEnabled, maxConcurrentSubagents: manager.maxConcurrentSubagents,
 		compaction: manager.compaction, extraBody: manager.extraBody, mcpServers: manager.mcpServers,
 	}, voiceSTT)
 	if err != nil {
-		for _, c := range mcpClients {
-			_ = c.Stop()
-		}
 		return err
 	}
 	environment, err := containerEnvironment(request.Endpoint, workspaceRoot, manager.terminalTimeout, manager.webSearchEnabled, request.RunID, request.TaskID)
@@ -481,7 +453,6 @@ func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) 
 		artifactDir:   filepath.Join(manager.outputDir, request.TaskID, "harness"),
 		endpoint:     request.Endpoint, model: request.Model,
 		agentTimeout: agentTimeout, apiKey: apiKey, extractAPIKey: extractAPIKey, voiceAPIKey: voiceAPIKey,
-		mcpClients:  mcpClients,
 	}
 	fail := func(primary error) error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), manager.cleanupTimeout)
@@ -894,24 +865,6 @@ func (manager *Manager) Stop(ctx context.Context) error {
 	close(done)
 	manager.mu.Unlock()
 	return err
-}
-
-// CallTool invokes an MCP tool on the active session's named MCP client.
-func (manager *Manager) CallTool(ctx context.Context, serverName, toolName string, arguments map[string]any) (*mcp.CallToolResult, error) {
-	manager.mu.Lock()
-	active := manager.active
-	manager.mu.Unlock()
-
-	if active == nil {
-		return nil, errors.New("Hermes harness is not active")
-	}
-
-	for _, client := range active.mcpClients {
-		if client != nil && client.Config().Name == serverName {
-			return client.CallTool(ctx, toolName, arguments)
-		}
-	}
-	return nil, fmt.Errorf("MCP server %q not found in active Hermes session", serverName)
 }
 
 type execResult struct {
@@ -1334,12 +1287,6 @@ func (manager *Manager) stopSession(ctx context.Context, active *session) error 
 	if active == nil {
 		return nil
 	}
-	for _, client := range active.mcpClients {
-		if client != nil {
-			_ = client.Stop()
-		}
-	}
-	active.mcpClients = nil
 	if active.containerID == "" {
 		clearSessionSecrets(active)
 		return nil

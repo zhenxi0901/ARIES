@@ -902,6 +902,8 @@ func TestHarnessMCPServerConfigValidation(t *testing.T) {
 			`"harness":{"type":"openclaw","mcp_servers":[{"name":"s1","command":"c1","url":"https://example.com"}]}`, 1),
 		"relative url": strings.Replace(validConfig, `"harness":{"type":"openclaw"}`,
 			`"harness":{"type":"openclaw","mcp_servers":[{"name":"s1","url":"/local/path"}]}`, 1),
+		"env rejected": strings.Replace(validConfig, `"harness":{"type":"openclaw"}`,
+			`"harness":{"type":"openclaw","mcp_servers":[{"name":"s1","command":"c1","env":{"SECRET":"val"}}]}`, 1),
 	}
 
 	for name, text := range invalidCases {

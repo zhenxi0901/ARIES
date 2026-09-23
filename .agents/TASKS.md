@@ -1,5 +1,16 @@
 # ARIES Tasks
 
+## PR #49 — In-harness MCP server support (Closes #35)
+
+- Added Model Context Protocol (MCP) server configuration support to ARIES harnesses.
+- Relocated `MCPServerConfig` and `ValidateMCPServer` to `pkg/core` to enforce clean package boundaries per AGENTS.md.
+- Validated server names, command/URL exclusivity, and strictly rejected `env` to eliminate secret leakage into profiles, configs, and run artifacts.
+- Implemented container-native MCP execution for OpenClaw and Hermes harnesses:
+  - OpenClaw renders MCP servers into `openclaw.json` and gates sandboxed execution via `"bundle-mcp"` in `alsoAllow`.
+  - Hermes renders MCP servers into `config.yaml` under `mcp_servers`.
+- Eliminated host-side `MCPClient` instances and external `CallTool` dispatches, keeping all tool execution contained within the agent harness container.
+- Cleaned dependency graph: removed external `github.com/modelcontextprotocol/go-sdk` dependency, restoring upstream `go.mod` and `go.sum`.
+
 ## PR #51 — Effective Hermes temperature
 
 - Confirmed the pinned one-shot ignores model YAML temperature. Route explicit

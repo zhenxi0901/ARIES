@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hyscale-lab/aries/internal/harness"
 	"github.com/hyscale-lab/aries/pkg/core"
 )
 
@@ -437,7 +436,7 @@ func TestRenderConfigMapsOpenAICompatibleBackendsToCustomProvider(t *testing.T) 
 }
 
 func TestRenderConfig_MCPServers(t *testing.T) {
-	servers := []harness.MCPServerConfig{
+	servers := []core.MCPServerConfig{
 		{
 			Name:    "filesystem",
 			Command: "npx",

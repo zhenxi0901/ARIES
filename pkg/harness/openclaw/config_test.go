@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hyscale-lab/aries/internal/harness"
 	"github.com/hyscale-lab/aries/pkg/core"
 )
 
@@ -363,23 +362,20 @@ func TestRenderConfigKeysOpenAICompatibleProviderAsAries(t *testing.T) {
 }
 
 func TestRenderConfig_MCPServersAndSandboxAllowlist(t *testing.T) {
-	servers := []harness.MCPServerConfig{
+	servers := []core.MCPServerConfig{
 		{
 			Name:    "sqlite-server",
 			Command: "mcp-server-sqlite",
 			Args:    []string{"--db-path", "/tmp/test.db"},
-			Env:     map[string]string{"DEBUG": "1"},
 		},
 		{
 			Name: "remote-tools",
 			URL:  "https://mcp.example.com/sse",
 		},
 	}
-	toolNames := []string{"query_db", "fetch_remote"}
 
 	content, err := renderConfig(testModel(), testEndpoint(), ModeAgent, false, false, false, 0, MCPOptions{
-		Servers:   servers,
-		ToolNames: toolNames,
+		Servers: servers,
 	})
 	if err != nil {
 		t.Fatalf("renderConfig failed: %v", err)
@@ -395,7 +391,7 @@ func TestRenderConfig_MCPServersAndSandboxAllowlist(t *testing.T) {
 	}
 
 	sqlite, ok := configuration.MCP.Servers["sqlite-server"]
-	if !ok || sqlite.Command != "mcp-server-sqlite" || sqlite.Transport != "stdio" || len(sqlite.Args) != 2 || sqlite.Env["DEBUG"] != "1" {
+	if !ok || sqlite.Command != "mcp-server-sqlite" || sqlite.Transport != "stdio" || len(sqlite.Args) != 2 {
 		t.Fatalf("sqlite server config = %#v", sqlite)
 	}
 
@@ -405,10 +401,10 @@ func TestRenderConfig_MCPServersAndSandboxAllowlist(t *testing.T) {
 	}
 
 	if configuration.Tools.Sandbox == nil {
-		t.Fatal("tools.sandbox must not be nil when MCP toolNames are provided")
+		t.Fatal("tools.sandbox must not be nil when MCP servers are provided")
 	}
 	alsoAllow := configuration.Tools.Sandbox.Tools.AlsoAllow
-	if len(alsoAllow) != 2 || alsoAllow[0] != "query_db" || alsoAllow[1] != "fetch_remote" {
-		t.Fatalf("tools.sandbox.tools.alsoAllow = %v, want [query_db, fetch_remote]", alsoAllow)
+	if len(alsoAllow) != 1 || alsoAllow[0] != "bundle-mcp" {
+		t.Fatalf("tools.sandbox.tools.alsoAllow = %v, want [bundle-mcp]", alsoAllow)
 	}
 }
