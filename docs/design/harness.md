@@ -121,7 +121,7 @@ registration, discovery, factory, reflection, DI, or generic plugin layer.
 
 ARIES supports configuring Model Context Protocol (MCP) servers for agent harnesses via `harness.mcp_servers`.
 
-`core.MCPServerConfig` defines the server configuration (name, command/args for stdio, or URL for SSE/HTTP). Configuration validation is enforced by `core.ValidateMCPServer`:
+`core.MCPServerConfig` defines the server configuration (name, command/args for stdio, or URL for SSE/HTTP). A URL server may name its `transport` (`sse` or `streamable-http`; empty keeps the harness's default, which differs between harnesses) and any server a per-call `timeout_seconds` (zero keeps the harness's default). Configuration validation is enforced by `core.ValidateMCPServer`:
 - Server names must not contain whitespace or control characters.
 - Either an executable command or an absolute HTTP/HTTPS URL must be specified, never both.
 - Custom process environments (`env`) are rejected to eliminate secret leakage into configuration, profile, and run artifacts.

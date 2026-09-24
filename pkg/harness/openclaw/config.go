@@ -53,10 +53,11 @@ type openClawMCP struct {
 }
 
 type openClawMCPServer struct {
-	Command   string   `json:"command,omitempty"`
-	Args      []string `json:"args,omitempty"`
-	URL       string   `json:"url,omitempty"`
-	Transport string   `json:"transport,omitempty"`
+	Command          string   `json:"command,omitempty"`
+	Args             []string `json:"args,omitempty"`
+	URL              string   `json:"url,omitempty"`
+	Transport        string   `json:"transport,omitempty"`
+	RequestTimeoutMs int      `json:"requestTimeoutMs,omitempty"`
 }
 
 // MCPOptions configures MCP servers and sandbox-allowlisted tools for OpenClaw.
@@ -266,14 +267,18 @@ func renderConfig(model core.ModelConfig, endpoint core.ToolEndpoint, mode strin
 			servers := make(map[string]openClawMCPServer, len(opts.Servers))
 			for _, server := range opts.Servers {
 				entry := openClawMCPServer{
-					Command: server.Command,
-					Args:    server.Args,
-					URL:     server.URL,
+					Command:          server.Command,
+					Args:             server.Args,
+					URL:              server.URL,
+					RequestTimeoutMs: server.TimeoutSeconds * 1000,
 				}
 				if server.Command != "" {
 					entry.Transport = "stdio"
 				} else if server.URL != "" {
 					entry.Transport = "sse"
+					if server.Transport != "" {
+						entry.Transport = server.Transport
+					}
 				}
 				servers[server.Name] = entry
 			}
