@@ -202,6 +202,9 @@ func (r *Runner) runTask(ctx context.Context, task core.Task) (core.TaskResult, 
 	})
 	if err != nil {
 		allErrors = append(allErrors, fmt.Errorf("start sandbox: %w", err))
+		// A sandbox returned with its start error still owns what its
+		// rollback could not remove; cleanup retries it.
+		sandboxActive = sandbox != nil
 		return finish()
 	}
 	if sandbox == nil {

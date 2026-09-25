@@ -148,6 +148,7 @@ type fakeToolSandbox struct {
 	mu         sync.Mutex
 	log        *callLog
 	startErr   error
+	startLeaks bool // Start fails but returns the sandbox: its rollback left resources
 	stopErrors []error
 	stopWait   bool
 	stops      int
@@ -166,9 +167,28 @@ func (f *fakeToolSandbox) Start(ctx context.Context, request core.SandboxRequest
 	}
 	if f.startErr != nil {
 		f.log.addRollback("sandbox.rollback", ctx)
+		if f.startLeaks {
+			return f.sandbox, f.startErr
+		}
 		return nil, f.startErr
 	}
 	return f.sandbox, nil
+}
+
+func TestRunnerStopsASandboxWhoseStartCouldNotRollBack(t *testing.T) {
+	rig := newRig(t, 1)
+	startErr := errors.New("start failed and rollback left a network")
+	rig.factory.startErr, rig.factory.startLeaks = startErr, true
+	result, err := rig.runner.Run(context.Background())
+	if !errors.Is(err, startErr) {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if rig.factory.stopCount() != 1 {
+		t.Fatalf("sandbox stops = %d, want 1", rig.factory.stopCount())
+	}
+	if status := result.Tasks[0].Cleanup.Status; status != core.StatusSucceeded {
+		t.Fatalf("cleanup status = %q, want succeeded", status)
+	}
 }
 
 func (f *fakeToolSandbox) Stop(ctx context.Context, _ Sandbox) error {
