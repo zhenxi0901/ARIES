@@ -97,8 +97,9 @@ starts a small loopback forwarder inside the container that carries those
 ports (`1143`, `1587`, `2525`, `10001`, `10003`, `10005`, `20001`) to the
 Docker host, where Toolathlon's deployments publish them. The forwarder
 targets the container's default gateway unless `benchmark.toolathlon.app_host`
-names the host explicitly. Toolathlon's configuration files are used
-unmodified.
+names the host explicitly. With `benchmark.toolathlon.applications` (below) it
+carries each port to the occurrence's own copy instead. Toolathlon's
+configuration files are used unmodified.
 
 **Grader hiding.** Toolathlon copies the grader and ground truth out of the
 container with `docker cp` while the agent runs. The adapter archives the
@@ -249,7 +250,7 @@ What to know before running them:
   "root": ".cache/toolathlon",
   "tasks": ["canvas-list-test"],
   "environment": {"image": "docker.io/lockon0927/toolathlon-task-image:1016beta"},
-  "toolathlon": {"gateway_port": 10086, "app_host": "", "max_steps": 200, "credentials_dir": ""}
+  "toolathlon": {"gateway_port": 10086, "app_host": "", "max_steps": 200, "credentials_dir": "", "applications": {}}
 },
 "harness": {"type": "hermes"}
 ```
@@ -257,7 +258,8 @@ What to know before running them:
 `benchmark.environment.workdir` is fixed to Toolathlon's agent workspace and
 `allow_network` to true; a profile that sets them otherwise is rejected. The
 `benchmark.toolathlon` block is optional and its values above are the
-defaults. `credentials_dir` unlocks the account-backed tasks (above).
+defaults. `credentials_dir` unlocks the account-backed tasks (above);
+`applications` gives each occurrence its own applications (below).
 `max_steps` does **not** bound the agent: it is Toolathlon's
 `max_steps_under_single_turn_mode`, handed to its preprocess for the task
 bundle, where it is bookkeeping for Toolathlon's own loop — which does not
@@ -273,9 +275,44 @@ corrupt each other. Task load therefore refuses any application-backed
 task when `execution.concurrency` is above 1, naming the tasks; with
 concurrency 1, looping included, occurrences never overlap. The same holds
 for the account-backed tasks, whose state lives in one third-party account.
-Tasks with neither run at any concurrency. Isolating application state per
-occurrence would need one deployment per sandbox (Toolathlon's instance
-prefixes) and per-occurrence ports, which the adapter does not manage.
+Tasks with neither run at any concurrency, and so do application-backed
+tasks with their own applications (next).
+
+**Per-occurrence applications.** `benchmark.toolathlon.applications` gives
+every occurrence its own copies of the applications it uses, started beside
+its sandbox as companions on its private network and removed with it, so
+application-backed tasks run at any concurrency and each starts from the same
+state. It names prepared images, one list of containers per application:
+
+```json
+"toolathlon": {"applications": {
+  "canvas": [{"name": "canvas", "image": "aries-toolathlon/canvas:9be8d8fe"}],
+  "poste": [{"name": "poste", "image": "aries-toolathlon/poste:9be8d8fe", "hostname": "mcp.com"}],
+  "woocommerce": [
+    {"name": "woo-db", "image": "aries-toolathlon/woo-db:9be8d8fe", "aliases": ["woo-db", "woo-db-inst-alpha"]},
+    {"name": "woo-wp", "image": "aries-toolathlon/woo-wp:9be8d8fe"}
+  ]
+}}
+```
+
+The forwarder routes `10001` to `canvas:3000`; `10005`, `2525`, `1143` and
+`1587` to `poste` on `80`, `25`, `143` and `587`; and `10003` to `woo-wp:80`,
+so each application must include a container reachable by that name. Canvas's
+HTTPS port `20001` is served inside the sandbox by Toolathlon's own
+`deployment/utils/build_proxy.mjs`, as its setup runs it on the host. Before
+preprocess the adapter waits, for up to ten minutes, until every application
+answers through the forwarder at the protocol its MCP server speaks, three
+times in a row, and records the seconds each took in `app-ready.json`.
+
+The images are a deployment made once and saved: run each application's
+`deployment/<app>/scripts/setup.sh` from the pinned checkout, stop the
+containers, commit them, and carry each volume's content into a derived image
+at the same path (a new container's anonymous volume starts from it). poste.io
+rewrites its Dovecot and Haraka settings on every start, so its image also
+needs a start-up script in `/etc/cont-init.d/` that re-applies the
+plaintext-authentication edits of setup.sh's `configure_dovecot`; without it,
+the `emails` server's logins are refused. `app_host` and `applications` are
+exclusive.
 
 The gateway needs no `harness.mcp` entry: the adapter registers it
 with the harness as `toolathlon` (SSE at `task-sandbox` on `gateway_port`,
