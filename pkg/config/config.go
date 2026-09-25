@@ -173,6 +173,12 @@ type ToolathlonConfig struct {
 	// loadable; without them those tasks are refused at task load.
 	CredentialsEnv     map[string]string `json:"credentials_env,omitempty"`
 	CredentialFilesEnv map[string]string `json:"credential_files_env,omitempty"`
+	// Applications gives every occurrence its own copies of the self-hosted
+	// applications it uses, started beside its sandbox from these images
+	// instead of the shared deployment on the Docker host, which lets
+	// application-backed tasks run concurrently. Keys are canvas, poste, and
+	// woocommerce; the adapter validates the rest.
+	Applications map[string][]core.Companion `json:"applications,omitempty"`
 }
 
 // BenchmarkEnvironment describes the task sandbox for benchmarks (currently
@@ -930,6 +936,9 @@ func (c *Config) validateBenchmarkType() error {
 				if !validEnvName(variable) {
 					return fmt.Errorf("benchmark.toolathlon.credential_files_env[%q] must name an environment variable", file)
 				}
+			}
+			if len(settings.Applications) != 0 && settings.AppHost != "" {
+				return errors.New("benchmark.toolathlon.app_host and applications are exclusive")
 			}
 		}
 		return nil

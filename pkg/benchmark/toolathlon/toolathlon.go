@@ -98,6 +98,14 @@ const (
 	forwarderLogPath     = privateRoot + "/portfwd.log"
 	forwarderReadyPath   = privateRoot + "/portfwd.ready"
 	forwarderScriptPath  = privateRoot + "/portfwd.py"
+	// With companion applications: the readiness probe and its result, and
+	// Canvas's HTTPS proxy's log and certificate.
+	appReadyScriptPath = privateRoot + "/appready.py"
+	appReadyResultPath = privateRoot + "/app-ready.json"
+	httpsProxyLogPath  = privateRoot + "/canvas-https.log"
+	httpsProxyCertDir  = privateRoot + "/canvas-https"
+	// appReadyHostName is the readiness result kept in the run directory.
+	appReadyHostName = "app-ready.json"
 
 	// evalConfigPath is Toolathlon's formal run configuration, relative to
 	// workspaceRoot. It carries the MCP server catalogue and the
@@ -166,13 +174,21 @@ type Options struct {
 	// refused without it (see localTools).
 	HarnessWebSearch bool
 	// Concurrency is how many task occurrences the run may execute at once.
-	// The self-hosted applications are one deployment shared by every
-	// sandbox (each forwards to the same host and ports), and a task's
-	// preprocess resets the state of the applications it uses, so
-	// application-backed tasks are accepted only at concurrency 1; so are
+	// Without Applications the self-hosted applications are one deployment
+	// shared by every sandbox (each forwards to the same host and ports),
+	// and a task's preprocess resets the state of the applications it uses,
+	// so application-backed tasks are accepted only at concurrency 1; so are
 	// account-backed tasks, whose state lives in one third-party account.
 	// Zero means 1.
 	Concurrency int
+	// Applications gives every occurrence its own copies of the
+	// self-hosted applications it uses, started beside its sandbox as
+	// companions from prepared images, instead of the shared deployment on
+	// the Docker host. Keys are canvas, poste, and woocommerce; each lists
+	// the containers of that application, which must include the one the
+	// adapter routes to (canvas, poste, woo-wp; see applicationRoutes).
+	// With it, application-backed tasks run at any concurrency.
+	Applications map[string][]core.Companion
 	// CredentialsEnv maps Toolathlon token fields to host environment
 	// variables, and CredentialFilesEnv key files under configs/ to
 	// variables holding their contents; they make the account-backed servers
@@ -200,6 +216,7 @@ type Benchmark struct {
 	modelName        string
 	harnessWebSearch bool
 	concurrency      int
+	applications     map[string][]core.Companion
 
 	// Account credentials come from the environment (credentials.go); creds
 	// and scrub are set by Tasks.
@@ -220,6 +237,12 @@ type taskDetails struct {
 	// needsApplications is true when any MCP server is backed by one of the
 	// self-hosted applications, so the loopback forwarder must run.
 	needsApplications bool
+	// applications names them (canvas, poste, woocommerce), sorted.
+	applications []string
+	// companions is true when this occurrence runs its own copies of them
+	// beside the sandbox (Options.Applications) rather than reaching the
+	// shared deployment.
+	companions bool
 	// needsCredentials is true when any MCP server is account-backed, so
 	// the credentials are overlaid on the sandbox's configs/.
 	needsCredentials bool
@@ -407,6 +430,80 @@ func catalogueServerName(path string) (string, error) {
 // WooCommerce. The forwarder carries exactly these to the Docker host.
 var applicationPorts = []int{1143, 1587, 2525, 10001, 10003, 10005, 20001}
 
+// applicationOfServer names the self-hosted application behind each
+// application-backed MCP server: the keys of Options.Applications.
+var applicationOfServer = map[string]string{"canvas": "canvas", "emails": "poste", "woocommerce": "woocommerce"}
+
+// applicationRoute carries one of the fixed localhost ports to the companion
+// that serves it: the companion's alias and its own port.
+type applicationRoute struct {
+	port      int
+	companion string
+	target    int
+}
+
+// applicationRoutes are the ports each application serves when it runs as
+// companions; Toolathlon's setup.sh publishes the same container ports on
+// these host ports. Canvas's HTTPS port 20001 is not routed: Toolathlon's own
+// HTTPS proxy (httpsProxyEntry) runs inside the sandbox in front of 10001, as
+// its setup.sh runs it on the host.
+var applicationRoutes = map[string][]applicationRoute{
+	"canvas":      {{10001, "canvas", 3000}},
+	"poste":       {{10005, "poste", 80}, {2525, "poste", 25}, {1143, "poste", 143}, {1587, "poste", 587}},
+	"woocommerce": {{10003, "woo-wp", 80}},
+}
+
+// httpsProxyEntry is Toolathlon's HTTPS proxy for Canvas, carried in the
+// project archive for tasks whose Canvas runs as a companion.
+const httpsProxyEntry = "deployment/utils/build_proxy.mjs"
+
+// validateApplications checks what the adapter relies on; the sandbox
+// validates the containers themselves (names, images, aliases).
+func validateApplications(applications map[string][]core.Companion) error {
+	owners := make(map[string]string)
+	for _, application := range slices.Sorted(maps.Keys(applications)) {
+		routes, known := applicationRoutes[application]
+		if !known {
+			return fmt.Errorf("toolathlon applications: unknown application %q (canvas, poste, woocommerce)", application)
+		}
+		companions := applications[application]
+		for _, companion := range companions {
+			if strings.TrimSpace(companion.Name) == "" || strings.TrimSpace(companion.Image) == "" {
+				return fmt.Errorf("toolathlon applications: every %s container needs a name and an image", application)
+			}
+			if owner, taken := owners[companion.Name]; taken {
+				return fmt.Errorf("toolathlon applications: container name %q is used by both %s and %s", companion.Name, owner, application)
+			}
+			owners[companion.Name] = application
+		}
+		for _, route := range routes {
+			if !slices.ContainsFunc(companions, func(companion core.Companion) bool { return reachableAs(companion, route.companion) }) {
+				return fmt.Errorf("toolathlon applications: %s must include a container reachable as %q", application, route.companion)
+			}
+		}
+	}
+	return nil
+}
+
+// reachableAs mirrors the sandbox's rule: a companion answers to its aliases,
+// or to its name when it has none.
+func reachableAs(companion core.Companion, alias string) bool {
+	if len(companion.Aliases) == 0 {
+		return companion.Name == alias
+	}
+	return slices.Contains(companion.Aliases, alias)
+}
+
+func cloneCompanions(companions []core.Companion) []core.Companion {
+	cloned := make([]core.Companion, len(companions))
+	for index, companion := range companions {
+		companion.Env = maps.Clone(companion.Env)
+		companion.Aliases = slices.Clone(companion.Aliases)
+		cloned[index] = companion
+	}
+	return cloned
+}
+
 func New(options Options) (*Benchmark, error) {
 	if strings.TrimSpace(options.Root) == "" {
 		return nil, errors.New("toolathlon root is required")
@@ -437,6 +534,19 @@ func New(options Options) (*Benchmark, error) {
 	}
 	if options.AppHost != "" && !validHost(options.AppHost) {
 		return nil, fmt.Errorf("toolathlon application host %q is not a hostname or IP address", options.AppHost)
+	}
+	var applications map[string][]core.Companion
+	if len(options.Applications) != 0 {
+		if options.AppHost != "" {
+			return nil, errors.New("toolathlon app_host and applications are exclusive: with applications each occurrence runs its own copies instead of reaching the shared deployment")
+		}
+		if err := validateApplications(options.Applications); err != nil {
+			return nil, err
+		}
+		applications = make(map[string][]core.Companion, len(options.Applications))
+		for application, companions := range options.Applications {
+			applications[application] = cloneCompanions(companions)
+		}
 	}
 	if options.MaxSteps == 0 {
 		options.MaxSteps = DefaultMaxSteps
@@ -509,6 +619,7 @@ func New(options Options) (*Benchmark, error) {
 		modelName:        options.ModelName,
 		harnessWebSearch: options.HarnessWebSearch,
 		concurrency:      options.Concurrency,
+		applications:     applications,
 		details:          make(map[string]taskDetails, len(options.TaskIDs)),
 	}
 	benchmark.credentialsEnv = maps.Clone(options.CredentialsEnv)
@@ -540,7 +651,7 @@ func (b *Benchmark) Tasks(ctx context.Context) ([]core.Task, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		task, private, err := loadTask(b.root, id, b.environment, b.harnessWebSearch, catalogue, creds)
+		task, private, err := loadTask(b.root, id, b.environment, b.harnessWebSearch, catalogue, creds, b.applications)
 		if err != nil {
 			return nil, fmt.Errorf("load toolathlon task %q: %w", id, err)
 		}
@@ -548,7 +659,7 @@ func (b *Benchmark) Tasks(ctx context.Context) ([]core.Task, error) {
 		task.ID = executionID
 		tasks = append(tasks, task)
 		details[executionID] = private
-		if private.needsApplications || private.needsCredentials {
+		if private.needsCredentials || private.needsApplications && !private.companions {
 			sharedStateTasks = append(sharedStateTasks, id)
 		}
 	}
@@ -557,7 +668,8 @@ func (b *Benchmark) Tasks(ctx context.Context) ([]core.Task, error) {
 	// another task is in the middle of using; the account-backed tasks
 	// reset repositories, pages, and sheets in one account the same way.
 	// Refuse the overlap rather than serialize it, so a run's concurrency
-	// means what it says.
+	// means what it says. Occurrences with their own applications
+	// (Options.Applications) share nothing and are not refused.
 	if b.concurrency > 1 && len(sharedStateTasks) != 0 {
 		return nil, fmt.Errorf("application-backed and account-backed tasks share state outside the sandbox and must run at execution.concurrency 1 (concurrency %d with %s)", b.concurrency, strings.Join(sharedStateTasks, ", "))
 	}
@@ -577,7 +689,7 @@ func (b *Benchmark) Tasks(ctx context.Context) ([]core.Task, error) {
 // every task whose MCP servers or local tools the adapter cannot provide.
 // catalogue maps each server to its file; creds is nil when the profile
 // maps no credentials to environment variables.
-func loadTask(root, id string, environment core.Environment, harnessWebSearch bool, catalogue map[string]string, creds *credentials) (core.Task, taskDetails, error) {
+func loadTask(root, id string, environment core.Environment, harnessWebSearch bool, catalogue map[string]string, creds *credentials, applications map[string][]core.Companion) (core.Task, taskDetails, error) {
 	taskDir := filepath.Join(root, "tasks", taskPool, id)
 	configBytes, err := os.ReadFile(filepath.Join(taskDir, "task_config.json"))
 	if err != nil {
@@ -623,6 +735,9 @@ func loadTask(root, id string, environment core.Environment, harnessWebSearch bo
 			details.extraEntries = append(details.extraEntries, serverBinaries[server]...)
 		case kind == serverApplication:
 			details.needsApplications = true
+			if application := applicationOfServer[server]; !slices.Contains(details.applications, application) {
+				details.applications = append(details.applications, application)
+			}
 		}
 	}
 	tools, err := serverNames(parsed.NeededLocalTools)
@@ -657,6 +772,21 @@ func loadTask(root, id string, environment core.Environment, harnessWebSearch bo
 		Environment: environment,
 	}
 	task.Environment.Env = maps.Clone(environment.Env)
+	task.Environment.Companions = nil
+	slices.Sort(details.applications)
+	if applications != nil && details.needsApplications {
+		for _, application := range details.applications {
+			companions, configured := applications[application]
+			if !configured {
+				return core.Task{}, taskDetails{}, fmt.Errorf("task uses %s, which benchmark.toolathlon.applications does not configure", application)
+			}
+			task.Environment.Companions = append(task.Environment.Companions, cloneCompanions(companions)...)
+		}
+		details.companions = true
+		if slices.Contains(details.applications, "canvas") {
+			details.extraEntries = append(details.extraEntries, httpsProxyEntry)
+		}
+	}
 	return task, details, nil
 }
 

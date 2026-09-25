@@ -252,6 +252,7 @@ func toolathlonOptions(cfg config.Config, taskIDs, executionIDs []string, output
 		options.MaxSteps = settings.MaxSteps
 		options.CredentialsEnv = settings.CredentialsEnv
 		options.CredentialFilesEnv = settings.CredentialFilesEnv
+		options.Applications = settings.Applications
 	}
 	options.SecretLookup = lookup
 	return options
