@@ -158,6 +158,12 @@ type ToolathlonConfig struct {
 	// Notion, Snowflake, W&B, YouTube) loadable. Without it they are
 	// refused at task load.
 	CredentialsDir string `json:"credentials_dir,omitempty"`
+	// Applications gives every occurrence its own copies of the self-hosted
+	// applications it uses, started beside its sandbox from these images
+	// instead of the shared deployment on the Docker host, which lets
+	// application-backed tasks run concurrently. Keys are canvas, poste, and
+	// woocommerce; the adapter validates the rest.
+	Applications map[string][]core.Companion `json:"applications,omitempty"`
 }
 
 // BenchmarkEnvironment describes the task sandbox for benchmarks (currently
@@ -891,6 +897,9 @@ func (c *Config) validateBenchmarkType() error {
 			}
 			if settings.CredentialsDir != "" && strings.TrimSpace(settings.CredentialsDir) == "" {
 				return errors.New("benchmark.toolathlon.credentials_dir must be a directory path")
+			}
+			if len(settings.Applications) != 0 && settings.AppHost != "" {
+				return errors.New("benchmark.toolathlon.app_host and applications are exclusive")
 			}
 		}
 		return nil

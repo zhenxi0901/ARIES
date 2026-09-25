@@ -102,6 +102,18 @@ func TestToolathlonBenchmarkValidation(t *testing.T) {
 	if settings := cfg.Benchmark.Toolathlon; settings == nil || settings.GatewayPort != 10086 || settings.AppHost != "10.148.0.5" || settings.MaxSteps != 50 || settings.CredentialsDir != "/srv/toolathlon-credentials" {
 		t.Fatalf("toolathlon block = %#v", cfg.Benchmark.Toolathlon)
 	}
+	withApplications := strings.Replace(valid, `"tasks":["canvas-list-test"],`, `"tasks":["canvas-list-test"],"toolathlon":{"applications":{"poste":[{"name":"poste","image":"aries-toolathlon/poste:11d51136","hostname":"mcp.com"}],"woocommerce":[{"name":"woo-db","image":"aries-toolathlon/woo-db:11d51136","aliases":["woo-db","woo-db-inst-alpha"]},{"name":"woo-wp","image":"aries-toolathlon/woo-wp:11d51136"}]}},`, 1)
+	cfg, err = Decode(strings.NewReader(withApplications))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applications := cfg.Benchmark.Toolathlon.Applications; len(applications) != 2 || applications["poste"][0].Hostname != "mcp.com" || len(applications["woocommerce"][0].Aliases) != 2 {
+		t.Fatalf("applications = %#v", applications)
+	}
+	both := strings.Replace(withApplications, `"toolathlon":{"applications"`, `"toolathlon":{"app_host":"10.148.0.5","applications"`, 1)
+	if _, err := Decode(strings.NewReader(both)); err == nil || !strings.Contains(err.Error(), "app_host and applications are exclusive") {
+		t.Fatalf("app_host with applications: err = %v", err)
+	}
 
 	cases := map[string]struct {
 		input   string

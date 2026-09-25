@@ -30,6 +30,7 @@ var fixtureTasks = map[string]string{
 	"bad-server-name":  `{"needed_mcp_servers": ["../etc"], "max_turns": 10}`,
 	"no-evaluation":    `{"needed_mcp_servers": ["memory"], "max_turns": 10}`,
 	"empty-task":       `{"needed_mcp_servers": ["memory"], "max_turns": 10}`,
+	"mail-shop":        `{"needed_mcp_servers": ["woocommerce", "emails", "filesystem"], "max_turns": 10}`,
 }
 
 // fixtureTaskEntries are the direct children of the canvas-list-test task
@@ -75,6 +76,7 @@ func writeFixture(t *testing.T) string {
 	writeFile(t, root, "local_binary/github-mcp-server", "binary-not-copied\n")
 	writeFile(t, root, "local_binary/github-mcp-version.txt", "v0\n")
 	writeFile(t, root, "deployment/k8s/kind.yaml", "not copied\n")
+	writeFile(t, root, httpsProxyEntry, "// Toolathlon's HTTPS proxy\n")
 	for name, config := range fixtureTasks {
 		base := "tasks/" + taskPool + "/" + name + "/"
 		writeFile(t, root, base+"task_config.json", config)
@@ -299,6 +301,124 @@ func TestTasksMapsLocalToolsOntoTheHarness(t *testing.T) {
 	err = load(t, true, "odd-local-tool")
 	if err == nil || !strings.Contains(err.Error(), `local tool "ai_webpage_summary" is not one the adapter maps`) {
 		t.Fatalf("unknown local tool: err = %v", err)
+	}
+}
+
+// testApplications are companion definitions the way the image build writes
+// them: one container for Canvas and poste.io, two for WooCommerce.
+func testApplications() map[string][]core.Companion {
+	return map[string][]core.Companion{
+		"canvas": {{Name: "canvas", Image: "aries-toolathlon/canvas:pin"}},
+		"poste":  {{Name: "poste", Image: "aries-toolathlon/poste:pin", Hostname: "mcp.com"}},
+		"woocommerce": {
+			{Name: "woo-db", Image: "aries-toolathlon/woo-db:pin", Aliases: []string{"woo-db", "woo-db-inst-alpha"}},
+			{Name: "woo-wp", Image: "aries-toolathlon/woo-wp:pin", Env: map[string]string{"WORDPRESS_DB_HOST": "woo-db"}},
+		},
+	}
+}
+
+func TestNewValidatesApplications(t *testing.T) {
+	root := writeFixture(t)
+	for name, tc := range map[string]struct {
+		mutate  func(map[string][]core.Companion)
+		appHost string
+		wantErr string
+	}{
+		"unknown application": {mutate: func(a map[string][]core.Companion) { a["gitlab"] = a["canvas"] }, wantErr: `unknown application "gitlab"`},
+		"missing image":       {mutate: func(a map[string][]core.Companion) { a["canvas"][0].Image = "" }, wantErr: "needs a name and an image"},
+		"unrouted":            {mutate: func(a map[string][]core.Companion) { a["woocommerce"] = a["woocommerce"][:1] }, wantErr: `woocommerce must include a container reachable as "woo-wp"`},
+		"alias hides name":    {mutate: func(a map[string][]core.Companion) { a["poste"][0].Aliases = []string{"mail"} }, wantErr: `reachable as "poste"`},
+		"shared name": {mutate: func(a map[string][]core.Companion) {
+			a["poste"] = append(a["poste"], core.Companion{Name: "canvas", Image: "x/y:z"})
+		}, wantErr: `container name "canvas" is used by both canvas and poste`},
+		"with app_host": {appHost: "10.0.0.5", wantErr: "app_host and applications are exclusive"},
+	} {
+		applications := testApplications()
+		if tc.mutate != nil {
+			tc.mutate(applications)
+		}
+		options := baseOptions(t, root)
+		options.Applications = applications
+		options.AppHost = tc.appHost
+		if _, err := New(options); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: err = %v, want %q", name, err, tc.wantErr)
+		}
+	}
+}
+
+// With their own applications, occurrences share nothing: application tasks
+// load at any concurrency, each with copies of exactly the applications it
+// uses, while account-backed tasks keep the concurrency-1 rule.
+func TestTasksGivesEachOccurrenceItsOwnApplications(t *testing.T) {
+	root := writeFixture(t)
+	options := baseOptions(t, root)
+	options.TaskIDs = []string{"canvas-list-test", "mail-shop", "excel-only"}
+	options.Concurrency = 4
+	options.Applications = testApplications()
+	benchmark, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.Applications["canvas"][0].Image = "changed/after:new"
+	tasks, err := benchmark.Tasks(context.Background())
+	if err != nil {
+		t.Fatalf("application tasks with companions at concurrency 4: %v", err)
+	}
+	names := func(companions []core.Companion) []string {
+		var result []string
+		for _, companion := range companions {
+			result = append(result, companion.Name)
+		}
+		return result
+	}
+	if got := names(tasks[0].Environment.Companions); !slices.Equal(got, []string{"canvas"}) || tasks[0].Environment.Companions[0].Image != "aries-toolathlon/canvas:pin" {
+		t.Fatalf("canvas-list-test companions = %v (%+v)", got, tasks[0].Environment.Companions)
+	}
+	if got := names(tasks[1].Environment.Companions); !slices.Equal(got, []string{"poste", "woo-db", "woo-wp"}) {
+		t.Fatalf("mail-shop companions = %v", got)
+	}
+	if len(tasks[2].Environment.Companions) != 0 {
+		t.Fatalf("excel-only companions = %+v", tasks[2].Environment.Companions)
+	}
+	tasks[1].Environment.Companions[2].Env["WORDPRESS_DB_HOST"] = "changed"
+	if benchmark.applications["woocommerce"][1].Env["WORDPRESS_DB_HOST"] != "woo-db" {
+		t.Fatal("a task's companions share state with the benchmark's definitions")
+	}
+	canvas, mail := benchmark.details["canvas-list-test"], benchmark.details["mail-shop"]
+	if !canvas.companions || !slices.Equal(canvas.applications, []string{"canvas"}) || !slices.Contains(canvas.extraEntries, httpsProxyEntry) {
+		t.Fatalf("canvas-list-test details = %+v", canvas)
+	}
+	if !mail.companions || !slices.Equal(mail.applications, []string{"poste", "woocommerce"}) || slices.Contains(mail.extraEntries, httpsProxyEntry) {
+		t.Fatalf("mail-shop details = %+v", mail)
+	}
+
+	options = baseOptions(t, root)
+	options.TaskIDs = []string{"mail-shop", "github-task"}
+	options.Concurrency = 2
+	options.Applications = testApplications()
+	options.CredentialsDir = writeCredentials(t, "    github_token = \"ghp_example\",\n")
+	benchmark, err = New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := benchmark.Tasks(context.Background()); err == nil || !strings.Contains(err.Error(), "execution.concurrency 1 (concurrency 2 with github-task)") {
+		t.Fatalf("account-backed task beside companions at concurrency 2: err = %v", err)
+	}
+}
+
+func TestTasksRefusesAnApplicationTheProfileDoesNotConfigure(t *testing.T) {
+	root := writeFixture(t)
+	options := baseOptions(t, root)
+	options.TaskIDs = []string{"mail-shop"}
+	applications := testApplications()
+	delete(applications, "poste")
+	options.Applications = applications
+	benchmark, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := benchmark.Tasks(context.Background()); err == nil || !strings.Contains(err.Error(), "task uses poste, which benchmark.toolathlon.applications does not configure") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

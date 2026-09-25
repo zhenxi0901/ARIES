@@ -34,6 +34,10 @@ type flowSandbox struct {
 	stash    []dirEntry        // what the last `tar -cf` archived
 
 	forwarderStarted bool
+	forwarderArgs    []string
+	proxyStarted     bool
+	appsReady        bool
+	appsReadyExit    int
 	gatewayStarted   bool
 	projectInstalled bool
 	healthFailures   int
@@ -133,8 +137,30 @@ func (s *flowSandbox) Exec(_ context.Context, command core.Command) (core.Comman
 		case "aries-toolathlon-portfwd":
 			s.events = append(s.events, "forwarder")
 			s.forwarderStarted = true
+			s.forwarderArgs = slices.Clone(args[3:])
 			s.files[forwarderReadyPath] = true
 			return core.CommandResult{}, nil
+		case "aries-toolathlon-https-proxy":
+			if !s.forwarderStarted {
+				s.t.Error("Canvas HTTPS proxy started before the forwarder")
+			}
+			if args[3] != httpsProxyCertDir || args[4] != httpsProxyLogPath {
+				s.t.Errorf("HTTPS proxy arguments = %v", args[3:])
+			}
+			s.events = append(s.events, "https-proxy")
+			s.proxyStarted = true
+			return core.CommandResult{}, nil
+		case "aries-toolathlon-appready":
+			if !s.files[appReadyScriptPath] {
+				s.t.Error("readiness probe ran before its script was uploaded")
+			}
+			s.events = append(s.events, "apps-ready")
+			s.files[appReadyResultPath] = true
+			if s.appsReadyExit != 0 {
+				return core.CommandResult{ExitCode: s.appsReadyExit, Stdout: "appready: not ready after 600 s: canvas"}, nil
+			}
+			s.appsReady = true
+			return core.CommandResult{Stdout: "appready: canvas 41.2 s"}, nil
 		case "aries-toolathlon-portfwd-ready":
 			if s.files[forwarderReadyPath] {
 				return core.CommandResult{}, nil
@@ -351,6 +377,8 @@ func (s *flowSandbox) Download(_ context.Context, source, destination string) er
 		return os.WriteFile(destination, []byte("[gateway] exposed tools: []\n"), 0o600)
 	case runtimeManifestContainerPath:
 		return os.WriteFile(destination, []byte(s.runtimeManifest), 0o600)
+	case appReadyResultPath:
+		return os.WriteFile(destination, []byte(`{"ready_seconds": {"canvas": 41.2}, "timeout_seconds": 600}`), 0o600)
 	case evalResultPath:
 		return os.WriteFile(destination, []byte(s.evalResult), 0o600)
 	}
@@ -418,6 +446,77 @@ func TestPrepareSandboxRunsTheDecoupledStepsInOrder(t *testing.T) {
 	}
 	if _, err := archiveMemberNames(sandbox.uploads[archiveContainerPath]); err == nil {
 		t.Fatal("the uploaded project archive should have been deleted after upload")
+	}
+}
+
+func TestPrepareSandboxRoutesToOwnApplicationsAndWaitsForThem(t *testing.T) {
+	sandbox := newFlowSandbox(t, "canvas-list-test", true)
+	gatewayReadyDelay, forwarderReadyDelay = 0, 0
+	root := writeFixture(t)
+	options := baseOptions(t, root)
+	options.Applications = testApplications()
+	benchmark, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := benchmark.Tasks(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := benchmark.PrepareSandbox(context.Background(), tasks[0], sandbox); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"rm", "upload:project.tar", "project", "rm", "upload:portfwd.py", "forwarder", "https-proxy", "upload:appready.py", "apps-ready", "preprocess", "stash", "rm", "gateway", "rm", "manifest", "rm"}
+	if !slices.Equal(sandbox.events, want) {
+		t.Fatalf("events = %v\nwant     %v", sandbox.events, want)
+	}
+	if !slices.Equal(sandbox.forwarderArgs, []string{forwarderScriptPath, forwarderLogPath, "--ready", forwarderReadyPath, "--map", "10001=canvas:3000"}) {
+		t.Fatalf("forwarder arguments = %v", sandbox.forwarderArgs)
+	}
+	if !slices.Contains(sandbox.projectMembers, httpsProxyEntry) {
+		t.Fatal("the project archive does not carry Toolathlon's HTTPS proxy")
+	}
+	if _, err := os.Stat(filepath.Join(benchmark.outputDir, tasks[0].ID, "toolathlon", appReadyHostName)); err != nil {
+		t.Fatalf("readiness result not kept: %v", err)
+	}
+}
+
+func TestPrepareSandboxFailsWhenOwnApplicationsNeverAnswer(t *testing.T) {
+	sandbox := newFlowSandbox(t, "canvas-list-test", true)
+	sandbox.appsReadyExit = 1
+	gatewayReadyDelay, forwarderReadyDelay = 0, 0
+	root := writeFixture(t)
+	options := baseOptions(t, root)
+	options.Applications = testApplications()
+	benchmark, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := benchmark.Tasks(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = benchmark.PrepareSandbox(context.Background(), tasks[0], sandbox)
+	if err == nil || !strings.Contains(err.Error(), "applications did not become ready") || !strings.Contains(err.Error(), "canvas") {
+		t.Fatalf("err = %v", err)
+	}
+	if slices.Contains(sandbox.events, "preprocess") {
+		t.Fatal("preprocess ran against applications that never answered")
+	}
+}
+
+func TestForwarderKeepsTheSharedDeploymentRoutesWithoutApplications(t *testing.T) {
+	sandbox := newFlowSandbox(t, "canvas-list-test", true)
+	gatewayReadyDelay, forwarderReadyDelay = 0, 0
+	benchmark, task := preparedBenchmark(t, sandbox)
+	if err := benchmark.PrepareSandbox(context.Background(), task, sandbox); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(sandbox.forwarderArgs, []string{forwarderScriptPath, forwarderLogPath, "--ready", forwarderReadyPath, "--target", "auto", "--ports", "1143,1587,2525,10001,10003,10005,20001"}) {
+		t.Fatalf("forwarder arguments = %v", sandbox.forwarderArgs)
+	}
+	if sandbox.proxyStarted || slices.Contains(sandbox.events, "apps-ready") {
+		t.Fatal("companion-only steps ran for the shared deployment")
 	}
 }
 

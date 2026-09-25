@@ -20,6 +20,9 @@ import (
 //go:embed portfwd.py
 var forwarderScript []byte
 
+//go:embed appready.py
+var appReadyScript []byte
+
 // Package-level vars, not consts, so tests can shrink them to avoid waiting
 // out the real bounds.
 var (
@@ -30,6 +33,9 @@ var (
 	gatewayReadyDelay      = time.Second
 	forwarderReadyAttempts = 40
 	forwarderReadyDelay    = 250 * time.Millisecond
+	// applicationReadyTimeout bounds the wait for companion applications;
+	// Canvas alone takes about two minutes to boot on an idle host.
+	applicationReadyTimeout = 10 * time.Minute
 )
 
 // gatewayStartScript backgrounds Toolathlon's MCP gateway from the project
@@ -45,9 +51,18 @@ var (
 const gatewayStartScript = `cd ` + workspaceRoot + ` && nohup uv run python -m scripts.decoupled.container_tool_gateway ` +
 	`--bundle_file "$1" --host 0.0.0.0 --port "$2" --debug >"$3" 2>&1 &`
 
-// forwarderStartScript backgrounds the loopback forwarder: $1 script, $2
-// target host, $3 port list, $4 ready file, $5 log file.
-const forwarderStartScript = `nohup python3 "$1" --target "$2" --ports "$3" --ready "$4" >"$5" 2>&1 &`
+// forwarderStartScript backgrounds the loopback forwarder: $1 script, $2 log
+// file, then the forwarder's own flags.
+const forwarderStartScript = `script=$1; log=$2; shift 2; nohup python3 "$script" "$@" >"$log" 2>&1 &`
+
+// httpsProxyStartScript backgrounds Toolathlon's own HTTPS proxy for Canvas,
+// from the pinned tree, in front of the forwarded HTTP port: $1 certificate
+// directory, $2 log file. It serves https://localhost:20001 and forwards with
+// the Host header Canvas's image was configured with, localhost:10001.
+const httpsProxyStartScript = `cd ` + workspaceRoot + ` && nohup node ` + httpsProxyEntry + ` 20001 10001 localhost http "$1" >"$2" 2>&1 &`
+
+// appReadyRunScript runs the readiness probe: $1 script, then its flags.
+const appReadyRunScript = `script=$1; shift; exec python3 "$script" "$@"`
 
 // Toolathlon's scripts run under `uv run` from the image's own PATH, which
 // the sandbox does not resolve for a bare command name. The shell resolves
@@ -115,7 +130,12 @@ func (b *Benchmark) PrepareSandbox(ctx context.Context, task core.Task, sandbox 
 		}
 	}
 	if details.needsApplications {
-		if err := b.startForwarder(ctx, sandbox); err != nil {
+		if err := b.startForwarder(ctx, sandbox, details); err != nil {
+			return err
+		}
+	}
+	if details.companions {
+		if err := b.awaitApplications(ctx, sandbox, details, hostDir); err != nil {
 			return err
 		}
 	}
@@ -186,21 +206,39 @@ func extractArchive(ctx context.Context, sandbox runner.Sandbox, hostArchive, co
 	return removePaths(ctx, sandbox, []string{containerArchive})
 }
 
-func (b *Benchmark) startForwarder(ctx context.Context, sandbox runner.Sandbox) error {
-	scriptHost, err := os.CreateTemp(b.outputDir, ".portfwd-*.py")
+// uploadScript stages one embedded program on the host and uploads it.
+func (b *Benchmark) uploadScript(ctx context.Context, sandbox runner.Sandbox, content []byte, pattern, destination string) error {
+	what := filepath.Base(destination)
+	scriptHost, err := os.CreateTemp(b.outputDir, pattern)
 	if err != nil {
-		return fmt.Errorf("stage forwarder script: %w", err)
+		return fmt.Errorf("stage %s: %w", what, err)
 	}
 	defer os.Remove(scriptHost.Name())
-	if _, err := scriptHost.Write(forwarderScript); err != nil {
+	if _, err := scriptHost.Write(content); err != nil {
 		scriptHost.Close()
-		return fmt.Errorf("stage forwarder script: %w", err)
+		return fmt.Errorf("stage %s: %w", what, err)
 	}
 	if err := scriptHost.Close(); err != nil {
-		return fmt.Errorf("stage forwarder script: %w", err)
+		return fmt.Errorf("stage %s: %w", what, err)
 	}
-	if err := sandbox.Upload(ctx, scriptHost.Name(), forwarderScriptPath); err != nil {
-		return fmt.Errorf("upload forwarder script: %w", err)
+	if err := sandbox.Upload(ctx, scriptHost.Name(), destination); err != nil {
+		return fmt.Errorf("upload %s: %w", what, err)
+	}
+	return nil
+}
+
+// forwarderRoutes are the forwarder's flags: every application port to the
+// shared deployment, or, with companions, each port of the task's own
+// applications to the companion that serves it.
+func (b *Benchmark) forwarderRoutes(details taskDetails) []string {
+	if details.companions {
+		var routes []string
+		for _, application := range details.applications {
+			for _, route := range applicationRoutes[application] {
+				routes = append(routes, fmt.Sprintf("%d=%s:%d", route.port, route.companion, route.target))
+			}
+		}
+		return []string{"--map", strings.Join(routes, ",")}
 	}
 	target := b.appHost
 	if target == "" {
@@ -210,10 +248,15 @@ func (b *Benchmark) startForwarder(ctx context.Context, sandbox runner.Sandbox) 
 	for _, port := range applicationPorts {
 		ports = append(ports, strconv.Itoa(port))
 	}
-	started, err := sandbox.Exec(ctx, core.Command{
-		Path: "/bin/sh",
-		Args: []string{"-c", forwarderStartScript, "aries-toolathlon-portfwd", forwarderScriptPath, target, strings.Join(ports, ","), forwarderReadyPath, forwarderLogPath},
-	})
+	return []string{"--target", target, "--ports", strings.Join(ports, ",")}
+}
+
+func (b *Benchmark) startForwarder(ctx context.Context, sandbox runner.Sandbox, details taskDetails) error {
+	if err := b.uploadScript(ctx, sandbox, forwarderScript, ".portfwd-*.py", forwarderScriptPath); err != nil {
+		return err
+	}
+	args := append([]string{"-c", forwarderStartScript, "aries-toolathlon-portfwd", forwarderScriptPath, forwarderLogPath, "--ready", forwarderReadyPath}, b.forwarderRoutes(details)...)
+	started, err := sandbox.Exec(ctx, core.Command{Path: "/bin/sh", Args: args})
 	if err != nil {
 		return fmt.Errorf("start loopback forwarder: %w", err)
 	}
@@ -234,6 +277,38 @@ func (b *Benchmark) startForwarder(ctx context.Context, sandbox runner.Sandbox) 
 		}
 	}
 	return errors.New("loopback forwarder did not become ready before the bound")
+}
+
+// awaitApplications starts Canvas's HTTPS proxy when the task uses Canvas,
+// then waits until every companion application answers through the
+// forwarder at the protocol its MCP server speaks, and keeps the seconds
+// each took in the run directory (app-ready.json).
+func (b *Benchmark) awaitApplications(ctx context.Context, sandbox runner.Sandbox, details taskDetails, hostDir string) error {
+	if slices.Contains(details.applications, "canvas") {
+		command := core.Command{Path: "/bin/sh", Args: []string{"-c", httpsProxyStartScript, "aries-toolathlon-https-proxy", httpsProxyCertDir, httpsProxyLogPath}}
+		if err := execOK(ctx, sandbox, command, "start Canvas HTTPS proxy"); err != nil {
+			return err
+		}
+	}
+	if err := b.uploadScript(ctx, sandbox, appReadyScript, ".appready-*.py", appReadyScriptPath); err != nil {
+		return err
+	}
+	result, err := sandbox.Exec(ctx, core.Command{Path: "/bin/sh", Args: []string{
+		"-c", appReadyRunScript, "aries-toolathlon-appready", appReadyScriptPath,
+		"--apps", strings.Join(details.applications, ","),
+		"--timeout", strconv.Itoa(int(applicationReadyTimeout / time.Second)),
+		"--out", appReadyResultPath,
+	}})
+	if err != nil {
+		return fmt.Errorf("await applications: %w", err)
+	}
+	if err := sandbox.Download(ctx, appReadyResultPath, filepath.Join(hostDir, appReadyHostName)); err != nil && result.ExitCode == 0 {
+		return fmt.Errorf("download application readiness: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("applications did not become ready: %s", strings.TrimSpace(result.Stdout+" "+result.Stderr))
+	}
+	return nil
 }
 
 // runPreprocess runs Toolathlon's container_preprocess with the same
