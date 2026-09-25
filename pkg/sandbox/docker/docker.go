@@ -45,14 +45,15 @@ const (
 	execDrainTimeout      = 200 * time.Millisecond
 	execTrailerKeep       = 128
 	execStatePrefix       = "/tmp/.aries-exec-"
+	rootExecUser          = "0:0"
+	execShell             = `state=$1; token=$2; shift 2; umask 077; trap 'rm -f "$state" "$state.tmp"' EXIT; exec 3<&0; setsid "$@" <&3 & pid=$!; printf '%s\n' "$pid" >"$state.tmp" || exit 125; mv "$state.tmp" "$state" || exit 125; wait "$pid"; status=$?; rm -f "$state" "$state.tmp"; trap - EXIT; printf '\036ARIES_EXEC_EXIT_%s=%d\037' "$token" "$status" >&2; exit "$status"`
+	cancelExecShell       = `state=$1; attempts=0; while [ ! -r "$state" ]; do attempts=$((attempts+1)); [ "$attempts" -ge 200 ] && exit 70; sleep 0.01; done; IFS= read -r pgid <"$state" || exit 71; case "$pgid" in ''|*[!0-9]*|0|1) exit 71;; esac; kill -TERM "-$pgid" 2>/dev/null || :; sleep 0.2; kill -KILL "-$pgid" 2>/dev/null || :; rm -f "$state"; exit 0`
+
 	// companionLogTimeout and companionLogTail bound how long, and how much
 	// of each companion's output, cleanup spends on logs, so that collecting
 	// them cannot use up the time removal needs.
 	companionLogTimeout = 10 * time.Second
 	companionLogTail    = "2000"
-	rootExecUser          = "0:0"
-	execShell             = `state=$1; token=$2; shift 2; umask 077; trap 'rm -f "$state" "$state.tmp"' EXIT; exec 3<&0; setsid "$@" <&3 & pid=$!; printf '%s\n' "$pid" >"$state.tmp" || exit 125; mv "$state.tmp" "$state" || exit 125; wait "$pid"; status=$?; rm -f "$state" "$state.tmp"; trap - EXIT; printf '\036ARIES_EXEC_EXIT_%s=%d\037' "$token" "$status" >&2; exit "$status"`
-	cancelExecShell       = `state=$1; attempts=0; while [ ! -r "$state" ]; do attempts=$((attempts+1)); [ "$attempts" -ge 200 ] && exit 70; sleep 0.01; done; IFS= read -r pgid <"$state" || exit 71; case "$pgid" in ''|*[!0-9]*|0|1) exit 71;; esac; kill -TERM "-$pgid" 2>/dev/null || :; sleep 0.2; kill -KILL "-$pgid" 2>/dev/null || :; rm -f "$state"; exit 0`
 )
 
 var (

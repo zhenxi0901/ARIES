@@ -497,9 +497,9 @@ func TestPrepareSandboxRoutesToOwnApplicationsAndWaitsForThem(t *testing.T) {
 			t.Fatalf("timeline goes backwards: %+v", steps)
 		}
 	}
-	want := []string{"prepare_started", "project_installed", "forwarder_ready", "applications_ready", "preprocess_done", "grader_stashed", "gateway_ready", "prepared"}
-	if !slices.Equal(names, want) {
-		t.Fatalf("timeline steps = %v\nwant           %v", names, want)
+	wantSteps := []string{"prepare_started", "project_installed", "forwarder_ready", "applications_ready", "preprocess_done", "grader_stashed", "gateway_ready", "prepared"}
+	if !slices.Equal(names, wantSteps) {
+		t.Fatalf("timeline steps = %v\nwant           %v", names, wantSteps)
 	}
 }
 
