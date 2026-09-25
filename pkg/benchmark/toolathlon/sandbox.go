@@ -33,9 +33,6 @@ var (
 	gatewayReadyDelay      = time.Second
 	forwarderReadyAttempts = 40
 	forwarderReadyDelay    = 250 * time.Millisecond
-	// applicationReadyTimeout bounds the wait for companion applications;
-	// Canvas alone takes about two minutes to boot on an idle host.
-	applicationReadyTimeout = 10 * time.Minute
 )
 
 // gatewayStartScript backgrounds Toolathlon's MCP gateway from the project
@@ -108,6 +105,8 @@ func (b *Benchmark) PrepareSandbox(ctx context.Context, task core.Task, sandbox 
 	if err := os.MkdirAll(hostDir, 0o700); err != nil {
 		return fmt.Errorf("create toolathlon artifact directory: %w", err)
 	}
+	timeline := newPrepareTimeline()
+	defer timeline.write(filepath.Join(hostDir, prepareTimelineHostName))
 
 	// A reused or dirty image must not pre-seed the two files Evaluate
 	// trusts, nor carry a previous task's private state.
@@ -124,24 +123,29 @@ func (b *Benchmark) PrepareSandbox(ctx context.Context, task core.Task, sandbox 
 	if err := b.installProject(ctx, sandbox, details.name, details.extraEntries, hostDir); err != nil {
 		return err
 	}
+	timeline.mark("project_installed")
 	if details.needsCredentials {
 		if err := b.installCredentials(ctx, sandbox, hostDir); err != nil {
 			return err
 		}
+		timeline.mark("credentials_installed")
 	}
 	if details.needsApplications {
 		if err := b.startForwarder(ctx, sandbox, details); err != nil {
 			return err
 		}
+		timeline.mark("forwarder_ready")
 	}
 	if details.companions {
 		if err := b.awaitApplications(ctx, sandbox, details, hostDir); err != nil {
 			return err
 		}
+		timeline.mark("applications_ready")
 	}
 	if err := b.runPreprocess(ctx, sandbox, details.name, hostDir); err != nil {
 		return err
 	}
+	timeline.mark("preprocess_done")
 	bundleHostPath := filepath.Join(hostDir, "task_bundle.json")
 	if err := sandbox.Download(ctx, bundleContainerPath, bundleHostPath); err != nil {
 		return fmt.Errorf("download task bundle: %w", err)
@@ -158,9 +162,11 @@ func (b *Benchmark) PrepareSandbox(ctx context.Context, task core.Task, sandbox 
 	b.details[task.ID] = details
 	b.mu.Unlock()
 
+	timeline.mark("grader_stashed")
 	if err := b.startGateway(ctx, sandbox); err != nil {
 		return err
 	}
+	timeline.mark("gateway_ready")
 	// The gateway read the bundle at startup; the container copy is not
 	// needed again until evaluation re-injects the trusted host copy.
 	if err := removePaths(ctx, sandbox, []string{bundleContainerPath}); err != nil {
@@ -169,7 +175,37 @@ func (b *Benchmark) PrepareSandbox(ctx context.Context, task core.Task, sandbox 
 	if err := writeRuntimeManifest(ctx, sandbox, filepath.Join(hostDir, runtimeManifestHostName)); err != nil {
 		return fmt.Errorf("inventory evaluator runtime before harness: %w", err)
 	}
+	timeline.mark("prepared")
 	return nil
+}
+
+// prepareTimeline records when each preparation step finished, as absolute
+// UTC times, so that preparation can be lined up with the sandbox's own
+// records (companions.json) and the run's other phases. It is written even
+// when preparation fails, up to the last step that finished.
+type prepareTimeline struct {
+	steps []prepareStep
+}
+
+type prepareStep struct {
+	Step string    `json:"step"`
+	At   time.Time `json:"at"`
+}
+
+func newPrepareTimeline() *prepareTimeline {
+	return &prepareTimeline{steps: []prepareStep{{Step: "prepare_started", At: time.Now().UTC()}}}
+}
+
+func (t *prepareTimeline) mark(step string) {
+	t.steps = append(t.steps, prepareStep{Step: step, At: time.Now().UTC()})
+}
+
+// write is best effort: the timeline is evidence about a run, and a failure
+// to write it must not change the run's outcome.
+func (t *prepareTimeline) write(path string) {
+	if content, err := json.MarshalIndent(t.steps, "", "  "); err == nil {
+		_ = os.WriteFile(path, append(content, '\n'), 0o600)
+	}
 }
 
 // installProject uploads one archive of the pinned project tree and the task
@@ -296,7 +332,7 @@ func (b *Benchmark) awaitApplications(ctx context.Context, sandbox runner.Sandbo
 	result, err := sandbox.Exec(ctx, core.Command{Path: "/bin/sh", Args: []string{
 		"-c", appReadyRunScript, "aries-toolathlon-appready", appReadyScriptPath,
 		"--apps", strings.Join(details.applications, ","),
-		"--timeout", strconv.Itoa(int(applicationReadyTimeout / time.Second)),
+		"--timeout", strconv.Itoa(b.readySeconds),
 		"--out", appReadyResultPath,
 	}})
 	if err != nil {

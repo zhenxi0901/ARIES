@@ -104,8 +104,10 @@ const (
 	appReadyResultPath = privateRoot + "/app-ready.json"
 	httpsProxyLogPath  = privateRoot + "/canvas-https.log"
 	httpsProxyCertDir  = privateRoot + "/canvas-https"
-	// appReadyHostName is the readiness result kept in the run directory.
-	appReadyHostName = "app-ready.json"
+	// appReadyHostName is the readiness result kept in the run directory;
+	// prepareTimelineHostName the preparation steps' finishing times.
+	appReadyHostName        = "app-ready.json"
+	prepareTimelineHostName = "prepare-timeline.json"
 
 	// evalConfigPath is Toolathlon's formal run configuration, relative to
 	// workspaceRoot. It carries the MCP server catalogue and the
@@ -189,6 +191,9 @@ type Options struct {
 	// adapter routes to (canvas, poste, woo-wp; see applicationRoutes).
 	// With it, application-backed tasks run at any concurrency.
 	Applications map[string][]core.Companion
+	// ApplicationReadySeconds bounds the wait for those copies to answer
+	// before preprocess. Zero selects DefaultApplicationReadySeconds.
+	ApplicationReadySeconds int
 	// CredentialsDir is a host directory holding Toolathlon's filled
 	// configs/token_key_session.py and the key files it names, which makes
 	// the account-backed servers available (see credentials.go). Empty
@@ -213,6 +218,7 @@ type Benchmark struct {
 	concurrency      int
 	credentialsDir   string
 	applications     map[string][]core.Companion
+	readySeconds     int
 
 	mu      sync.RWMutex
 	details map[string]taskDetails
@@ -440,6 +446,10 @@ var applicationRoutes = map[string][]applicationRoute{
 	"woocommerce": {{10003, "woo-wp", 80}},
 }
 
+// DefaultApplicationReadySeconds bounds the wait for companion applications:
+// Canvas alone takes about two minutes to boot from a fresh deployment.
+const DefaultApplicationReadySeconds = 600
+
 // httpsProxyEntry is Toolathlon's HTTPS proxy for Canvas, carried in the
 // project archive for tasks whose Canvas runs as a companion.
 const httpsProxyEntry = "deployment/utils/build_proxy.mjs"
@@ -535,6 +545,12 @@ func New(options Options) (*Benchmark, error) {
 			applications[application] = cloneCompanions(companions)
 		}
 	}
+	if options.ApplicationReadySeconds == 0 {
+		options.ApplicationReadySeconds = DefaultApplicationReadySeconds
+	}
+	if options.ApplicationReadySeconds < 0 {
+		return nil, errors.New("toolathlon application readiness bound must be positive")
+	}
 	if options.MaxSteps == 0 {
 		options.MaxSteps = DefaultMaxSteps
 	}
@@ -610,6 +626,7 @@ func New(options Options) (*Benchmark, error) {
 		concurrency:      options.Concurrency,
 		credentialsDir:   options.CredentialsDir,
 		applications:     applications,
+		readySeconds:     options.ApplicationReadySeconds,
 		details:          make(map[string]taskDetails, len(options.TaskIDs)),
 	}, nil
 }

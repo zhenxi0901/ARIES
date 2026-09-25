@@ -455,6 +455,7 @@ func TestPrepareSandboxRoutesToOwnApplicationsAndWaitsForThem(t *testing.T) {
 	root := writeFixture(t)
 	options := baseOptions(t, root)
 	options.Applications = testApplications()
+	options.ApplicationReadySeconds = 42
 	benchmark, err := New(options)
 	if err != nil {
 		t.Fatal(err)
@@ -465,6 +466,11 @@ func TestPrepareSandboxRoutesToOwnApplicationsAndWaitsForThem(t *testing.T) {
 	}
 	if err := benchmark.PrepareSandbox(context.Background(), tasks[0], sandbox); err != nil {
 		t.Fatal(err)
+	}
+	for _, command := range sandbox.commands {
+		if len(command.Args) > 2 && command.Args[2] == "aries-toolathlon-appready" && !strings.Contains(strings.Join(command.Args, " "), "--timeout 42") {
+			t.Fatalf("readiness bound not passed: %v", command.Args)
+		}
 	}
 	want := []string{"rm", "upload:project.tar", "project", "rm", "upload:portfwd.py", "forwarder", "https-proxy", "upload:appready.py", "apps-ready", "preprocess", "stash", "rm", "gateway", "rm", "manifest", "rm"}
 	if !slices.Equal(sandbox.events, want) {
@@ -478,6 +484,22 @@ func TestPrepareSandboxRoutesToOwnApplicationsAndWaitsForThem(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(benchmark.outputDir, tasks[0].ID, "toolathlon", appReadyHostName)); err != nil {
 		t.Fatalf("readiness result not kept: %v", err)
+	}
+	var steps []prepareStep
+	content, err := os.ReadFile(filepath.Join(benchmark.outputDir, tasks[0].ID, "toolathlon", prepareTimelineHostName))
+	if err != nil || json.Unmarshal(content, &steps) != nil {
+		t.Fatalf("prepare timeline = %s, %v", content, err)
+	}
+	var names []string
+	for index, step := range steps {
+		names = append(names, step.Step)
+		if index > 0 && step.At.Before(steps[index-1].At) {
+			t.Fatalf("timeline goes backwards: %+v", steps)
+		}
+	}
+	want := []string{"prepare_started", "project_installed", "forwarder_ready", "applications_ready", "preprocess_done", "grader_stashed", "gateway_ready", "prepared"}
+	if !slices.Equal(names, want) {
+		t.Fatalf("timeline steps = %v\nwant           %v", names, want)
 	}
 }
 
@@ -502,6 +524,10 @@ func TestPrepareSandboxFailsWhenOwnApplicationsNeverAnswer(t *testing.T) {
 	}
 	if slices.Contains(sandbox.events, "preprocess") {
 		t.Fatal("preprocess ran against applications that never answered")
+	}
+	content, err := os.ReadFile(filepath.Join(benchmark.outputDir, tasks[0].ID, "toolathlon", prepareTimelineHostName))
+	if err != nil || !strings.Contains(string(content), `"forwarder_ready"`) || strings.Contains(string(content), `"applications_ready"`) {
+		t.Fatalf("a failed preparation keeps its timeline up to the last finished step: %s, %v", content, err)
 	}
 }
 

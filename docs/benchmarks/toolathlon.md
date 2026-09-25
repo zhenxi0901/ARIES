@@ -300,9 +300,14 @@ The forwarder routes `10001` to `canvas:3000`; `10005`, `2525`, `1143` and
 so each application must include a container reachable by that name. Canvas's
 HTTPS port `20001` is served inside the sandbox by Toolathlon's own
 `deployment/utils/build_proxy.mjs`, as its setup runs it on the host. Before
-preprocess the adapter waits, for up to ten minutes, until every application
-answers through the forwarder at the protocol its MCP server speaks, three
-times in a row, and records the seconds each took in `app-ready.json`.
+preprocess the adapter waits until every application answers through the
+forwarder at the protocol its MCP server speaks, three times in a row, for up
+to `application_ready_seconds` (default 600). `app-ready.json` records how long
+that wait was and when each application was ready; the wait starts after the
+project install, so an application's full start-up is its ready time minus its
+container's start in `sandbox/companions.json`, which also records the image ID
+each copy ran and when it was removed. `toolathlon/prepare-timeline.json` gives
+the time each preparation step finished, also on a failed preparation.
 
 The images are a deployment made once and saved: run each application's
 `deployment/<app>/scripts/setup.sh` from the pinned checkout, stop the

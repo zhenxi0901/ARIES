@@ -248,6 +248,7 @@ func toolathlonOptions(cfg config.Config, taskIDs, executionIDs []string, output
 		options.MaxSteps = settings.MaxSteps
 		options.CredentialsDir = settings.CredentialsDir
 		options.Applications = settings.Applications
+		options.ApplicationReadySeconds = settings.ApplicationReadySeconds
 	}
 	return options
 }

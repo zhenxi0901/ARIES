@@ -164,6 +164,9 @@ type ToolathlonConfig struct {
 	// application-backed tasks run concurrently. Keys are canvas, poste, and
 	// woocommerce; the adapter validates the rest.
 	Applications map[string][]core.Companion `json:"applications,omitempty"`
+	// ApplicationReadySeconds bounds the wait for those copies to answer;
+	// zero means the adapter's default (600).
+	ApplicationReadySeconds int `json:"application_ready_seconds,omitempty"`
 }
 
 // BenchmarkEnvironment describes the task sandbox for benchmarks (currently
@@ -900,6 +903,9 @@ func (c *Config) validateBenchmarkType() error {
 			}
 			if len(settings.Applications) != 0 && settings.AppHost != "" {
 				return errors.New("benchmark.toolathlon.app_host and applications are exclusive")
+			}
+			if settings.ApplicationReadySeconds < 0 {
+				return errors.New("benchmark.toolathlon.application_ready_seconds must be positive")
 			}
 		}
 		return nil
