@@ -253,6 +253,7 @@ func toolathlonOptions(cfg config.Config, taskIDs, executionIDs []string, output
 		options.CredentialsEnv = settings.CredentialsEnv
 		options.CredentialFilesEnv = settings.CredentialFilesEnv
 		options.Applications = settings.Applications
+		options.ApplicationReadySeconds = settings.ApplicationReadySeconds
 	}
 	options.SecretLookup = lookup
 	return options

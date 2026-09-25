@@ -5,8 +5,11 @@ poste.io, WooCommerce) beside its sandbox, they start with the sandbox and
 some take minutes to boot. Toolathlon's preprocess seeds them through the same
 localhost ports its MCP servers use, so this probes those ports, through the
 loopback forwarder, at the protocol each server speaks, until every
-application has answered three times in a row, and writes the seconds each
-took to --out. Standard library only.
+application has answered three times in a row, and writes to --out the seconds
+each took from the start of this probe and the absolute time it was ready. The
+probe starts after the copies and the project install, so the seconds are the
+remaining wait; the application's full start-up is its ready time minus its
+container's start in the sandbox's companions.json. Standard library only.
 """
 
 import argparse
@@ -62,19 +65,23 @@ def main():
     if unknown:
         raise SystemExit(f"appready: unknown application {', '.join(unknown)}")
     started = time.monotonic()
+    started_at = time.time()
     streak = dict.fromkeys(apps, 0)
     ready = dict.fromkeys(apps)
+    ready_at = dict.fromkeys(apps)
     while True:
         for app in apps:
             if ready[app] is None:
                 streak[app] = streak[app] + 1 if PROBES[app]() else 0
                 if streak[app] >= 3:
                     ready[app] = round(time.monotonic() - started, 1)
+                    ready_at[app] = round(time.time(), 3)
         if all(seconds is not None for seconds in ready.values()) or time.monotonic() - started > args.timeout:
             break
         time.sleep(args.interval)
     with open(args.out, "w", encoding="ascii") as out:
-        json.dump({"ready_seconds": ready, "timeout_seconds": args.timeout}, out)
+        json.dump({"ready_seconds": ready, "ready_at": ready_at, "probe_started_at": round(started_at, 3),
+                   "timeout_seconds": args.timeout}, out)
     waiting = [app for app, seconds in ready.items() if seconds is None]
     if waiting:
         print(f"appready: not ready after {args.timeout:.0f} s: {', '.join(waiting)}", flush=True)
