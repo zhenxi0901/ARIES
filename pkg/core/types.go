@@ -20,7 +20,22 @@ type Environment struct {
 	GPUs         int               `json:"gpus,omitempty"`
 	AllowNetwork bool              `json:"allow_network"`
 	Env          map[string]string `json:"env,omitempty"`
+	Companions   []Companion       `json:"companions,omitempty"`
 	ExecUser     string            `json:"-"`
+}
+
+// Companion is a service container a task needs beside its sandbox, such as
+// an application the task's tools talk to. It joins the task's network under
+// its aliases (its name when none are given), runs its image's own
+// entrypoint, is not reachable from the host, and lives exactly as long as
+// the sandbox, so every task occurrence gets a fresh copy. Hostname is the
+// name the service sees itself as, for services that serve a domain.
+type Companion struct {
+	Name     string            `json:"name"`
+	Image    string            `json:"image"`
+	Hostname string            `json:"hostname,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+	Aliases  []string          `json:"aliases,omitempty"`
 }
 
 // SandboxRequest carries stable run and task identity separately from the

@@ -112,12 +112,22 @@ type Sandbox struct {
 	taskID         string
 
 	mu             sync.Mutex
+	companions     []*companionContainer
 	containerOwned bool
 	networkOwned   bool
 	stopped        bool
 	stopping       bool
 	stopDone       chan struct{}
 	stopErr        error
+}
+
+// companionContainer is one started companion; owned is guarded by the
+// sandbox's mutex and cleared once removal is confirmed.
+type companionContainer struct {
+	name          string
+	containerName string
+	id            string
+	owned         bool
 }
 
 // Close releases the manager's Docker SDK transport. Resource cleanup remains Stop's responsibility.
@@ -212,6 +222,15 @@ func (m *Manager) Start(ctx context.Context, request core.SandboxRequest) (runne
 	}
 	sandbox.networkOwned = true
 
+	// Companions start first so that slow applications boot while the task
+	// container and the benchmark's preparation get going; readiness is the
+	// benchmark's to check, since only it knows what "ready" means.
+	for _, companion := range request.Environment.Companions {
+		if err := sandbox.startCompanion(ctx, request, "aries-app-"+id+"-"+companion.Name, companion); err != nil {
+			return nil, sandbox.rollbackStart(ctx, err)
+		}
+	}
+
 	created, err := m.client.ContainerCreate(ctx, containerOptions(request, sandbox, ownershipLabels(request, "task-container")))
 	if err != nil {
 		return nil, sandbox.rollbackStart(ctx, fmt.Errorf("create docker task container: %w", err))
@@ -257,6 +276,51 @@ func ownershipLabels(request core.SandboxRequest, kind string) map[string]string
 		labels["aries.component"] = "sandbox"
 	}
 	return labels
+}
+
+// startCompanion creates and starts one companion on the task network. It is
+// recorded as owned as soon as Docker returns its ID, so a failed start is
+// still removed by the rollback.
+func (s *Sandbox) startCompanion(ctx context.Context, request core.SandboxRequest, containerName string, companion core.Companion) error {
+	created, err := s.client.ContainerCreate(ctx, companionOptions(request, s.networkName, containerName, companion))
+	if err != nil {
+		return fmt.Errorf("create docker companion %q: %w", companion.Name, err)
+	}
+	if strings.TrimSpace(created.ID) == "" {
+		return fmt.Errorf("create docker companion %q: Docker returned an empty container ID", companion.Name)
+	}
+	s.mu.Lock()
+	s.companions = append(s.companions, &companionContainer{name: companion.Name, containerName: containerName, id: created.ID, owned: true})
+	s.mu.Unlock()
+	if _, err := s.client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+		return fmt.Errorf("start docker companion %q: %w", companion.Name, err)
+	}
+	s.owner.logger.WithContext(ctx).WithFields(logrus.Fields{"container": containerName, "network": s.networkName}).Info("docker companion started")
+	return nil
+}
+
+// companionOptions places a companion on the task network only: no published
+// ports, no bind mounts, no Docker socket. Its data lives in the image and in
+// anonymous volumes that are removed with it.
+func companionOptions(request core.SandboxRequest, networkName, containerName string, companion core.Companion) client.ContainerCreateOptions {
+	labels := ownershipLabels(request, "task-companion")
+	labels["aries.component"] = "application"
+	labels["aries.application"] = companion.Name
+	return client.ContainerCreateOptions{
+		Name:       containerName,
+		Config:     &container.Config{Image: companion.Image, Hostname: companion.Hostname, Env: dockerEnvironment(companion.Env), Labels: labels},
+		HostConfig: &container.HostConfig{NetworkMode: container.NetworkMode(networkName)},
+		NetworkingConfig: &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{
+			networkName: {Aliases: companionAliases(companion)},
+		}},
+	}
+}
+
+func companionAliases(companion core.Companion) []string {
+	if len(companion.Aliases) == 0 {
+		return []string{companion.Name}
+	}
+	return slices.Clone(companion.Aliases)
 }
 
 func containerOptions(request core.SandboxRequest, sandbox *Sandbox, labels map[string]string) client.ContainerCreateOptions {
@@ -974,7 +1038,7 @@ func (s *Sandbox) stop(ctx context.Context) error {
 	s.mu.Lock()
 	s.stopErr = err
 	s.stopping = false
-	s.stopped = !s.containerOwned && !s.networkOwned
+	s.stopped = !s.containerOwned && !s.networkOwned && !s.ownsCompanionLocked()
 	close(done)
 	s.mu.Unlock()
 	return err
@@ -1008,6 +1072,7 @@ func (s *Sandbox) stopOnce(ctx context.Context, collectLogs bool) error {
 			errs = append(errs, fmt.Errorf("confirm docker task container absence: %w", err))
 		}
 	}
+	errs = append(errs, s.removeCompanions(ctx, collectLogs)...)
 	if networkOwned {
 		_, err := s.client.NetworkRemove(ctx, s.networkName, client.NetworkRemoveOptions{})
 		if err != nil && !cerrdefs.IsNotFound(err) {
@@ -1027,6 +1092,60 @@ func (s *Sandbox) stopOnce(ctx context.Context, collectLogs bool) error {
 	return errors.Join(errs...)
 }
 
+// removeCompanions removes every owned companion with its anonymous volumes,
+// in reverse start order, and confirms each is gone.
+func (s *Sandbox) removeCompanions(ctx context.Context, collectLogs bool) []error {
+	s.mu.Lock()
+	companions := slices.Clone(s.companions)
+	s.mu.Unlock()
+	var errs []error
+	for index := len(companions) - 1; index >= 0; index-- {
+		companion := companions[index]
+		s.mu.Lock()
+		owned := companion.owned
+		s.mu.Unlock()
+		if !owned {
+			continue
+		}
+		if collectLogs {
+			directory := filepath.Join(s.artifactDir, "companions")
+			if err := os.MkdirAll(directory, 0o700); err != nil {
+				errs = append(errs, fmt.Errorf("create docker companion log directory: %w", err))
+			} else {
+				errs = append(errs, s.collectContainerLogs(ctx, companion.id, filepath.Join(directory, companion.name)))
+			}
+		}
+		_, err := s.client.ContainerStop(ctx, companion.id, client.ContainerStopOptions{Timeout: intPointer(5)})
+		if err != nil && !cerrdefs.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("stop docker companion %q: %w", companion.name, err))
+		}
+		_, err = s.client.ContainerRemove(ctx, companion.id, client.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
+		if err != nil && !cerrdefs.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("remove docker companion %q: %w", companion.name, err))
+		}
+		_, err = s.client.ContainerInspect(ctx, companion.id, client.ContainerInspectOptions{})
+		if cerrdefs.IsNotFound(err) {
+			s.mu.Lock()
+			companion.owned = false
+			s.mu.Unlock()
+		} else if err == nil {
+			errs = append(errs, fmt.Errorf("confirm docker companion %q absence: container still exists", companion.name))
+		} else {
+			errs = append(errs, fmt.Errorf("confirm docker companion %q absence: %w", companion.name, err))
+		}
+	}
+	return errs
+}
+
+func (s *Sandbox) ownsCompanionLocked() bool {
+	for _, companion := range s.companions {
+		if companion.owned {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Sandbox) rollbackStart(ctx context.Context, primary error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cleanupTimeout)
 	defer cancel()
@@ -1037,17 +1156,23 @@ func (s *Sandbox) rollbackStart(ctx context.Context, primary error) error {
 }
 
 func (s *Sandbox) collectLogs(ctx context.Context) error {
-	stdout, err := os.OpenFile(filepath.Join(s.artifactDir, "container.stdout.log"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	return s.collectContainerLogs(ctx, s.containerID, filepath.Join(s.artifactDir, "container"))
+}
+
+// collectContainerLogs writes one container's output to <prefix>.stdout.log
+// and <prefix>.stderr.log.
+func (s *Sandbox) collectContainerLogs(ctx context.Context, containerID, prefix string) error {
+	stdout, err := os.OpenFile(prefix+".stdout.log", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("create docker task stdout log: %w", err)
 	}
 	defer stdout.Close()
-	stderr, err := os.OpenFile(filepath.Join(s.artifactDir, "container.stderr.log"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	stderr, err := os.OpenFile(prefix+".stderr.log", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("create docker task stderr log: %w", err)
 	}
 	defer stderr.Close()
-	stream, err := s.client.ContainerLogs(ctx, s.containerID, client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true})
+	stream, err := s.client.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true})
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return nil
@@ -1116,7 +1241,76 @@ func validateEnvironment(environment core.Environment) error {
 			return fmt.Errorf("invalid docker sandbox environment %q", key)
 		}
 	}
+	return validateCompanions(environment.Companions)
+}
+
+// validateCompanions requires unique names that fit a container name and a
+// DNS label, pullable images, valid environments, and aliases that collide
+// neither with each other nor with the sandbox's own alias.
+func validateCompanions(companions []core.Companion) error {
+	names := make(map[string]struct{}, len(companions))
+	aliases := map[string]struct{}{NetworkAlias: {}}
+	for _, companion := range companions {
+		if !validCompanionName(companion.Name) {
+			return fmt.Errorf("invalid docker companion name %q", companion.Name)
+		}
+		if _, duplicate := names[companion.Name]; duplicate {
+			return fmt.Errorf("duplicate docker companion %q", companion.Name)
+		}
+		names[companion.Name] = struct{}{}
+		if err := validatePullImage(companion.Image); err != nil {
+			return fmt.Errorf("invalid docker companion %q image: %w", companion.Name, err)
+		}
+		if companion.Hostname != "" && !validHostname(companion.Hostname) {
+			return fmt.Errorf("invalid docker companion %q hostname %q", companion.Name, companion.Hostname)
+		}
+		for key, value := range companion.Env {
+			if !validEnvName(key) || strings.ContainsRune(value, 0) {
+				return fmt.Errorf("invalid docker companion %q environment %q", companion.Name, key)
+			}
+		}
+		for _, alias := range companionAliases(companion) {
+			if !validCompanionName(alias) {
+				return fmt.Errorf("invalid docker companion %q alias %q", companion.Name, alias)
+			}
+			if _, taken := aliases[alias]; taken {
+				return fmt.Errorf("docker companion %q alias %q is already taken", companion.Name, alias)
+			}
+			aliases[alias] = struct{}{}
+		}
+	}
 	return nil
+}
+
+// validHostname accepts a lowercase DNS name of dot-separated labels.
+func validHostname(value string) bool {
+	if len(value) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if !validDNSLabel(label, 63) {
+			return false
+		}
+	}
+	return true
+}
+
+// validCompanionName accepts one lowercase DNS label of at most 40
+// characters, short enough to appear in a container name.
+func validCompanionName(value string) bool { return validDNSLabel(value, 40) }
+
+// validDNSLabel accepts letters, digits, and inner hyphens, lowercase, up to
+// limit characters.
+func validDNSLabel(value string, limit int) bool {
+	if value == "" || len(value) > limit || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, r := range value {
+		if r != '-' && (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func validateIdentity(kind, value string) error {

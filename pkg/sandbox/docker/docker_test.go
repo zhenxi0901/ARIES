@@ -90,7 +90,15 @@ type fakeClient struct {
 	downloadCalls  int
 	closeCalls     int
 	closeErr       error
+
+	// Companions are tracked apart from the one task container, by ID.
+	companionOpts    map[string]client.ContainerCreateOptions
+	companionFail    string
+	companionStarts  []string
+	companionRemoves []client.ContainerRemoveOptions
 }
+
+func isCompanionID(id string) bool { return strings.HasPrefix(id, "companion-") }
 
 func (f *fakeClient) Close() error {
 	f.mu.Lock()
@@ -143,6 +151,17 @@ func (f *fakeClient) NetworkRemove(context.Context, string, client.NetworkRemove
 func (f *fakeClient) ContainerCreate(_ context.Context, options client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if options.Config != nil && options.Config.Labels["aries.component"] == "application" {
+		name := options.Config.Labels["aries.application"]
+		if name == f.companionFail {
+			return client.ContainerCreateResult{}, errors.New("companion create failed")
+		}
+		if f.companionOpts == nil {
+			f.companionOpts = make(map[string]client.ContainerCreateOptions)
+		}
+		f.companionOpts["companion-"+name] = options
+		return client.ContainerCreateResult{ID: "companion-" + name}, nil
+	}
 	f.containerOpts = options
 	if f.createErr != nil {
 		return client.ContainerCreateResult{}, f.createErr
@@ -151,16 +170,27 @@ func (f *fakeClient) ContainerCreate(_ context.Context, options client.Container
 	return client.ContainerCreateResult{ID: f.containerID}, nil
 }
 
-func (f *fakeClient) ContainerStart(context.Context, string, client.ContainerStartOptions) (client.ContainerStartResult, error) {
+func (f *fakeClient) ContainerStart(_ context.Context, id string, _ client.ContainerStartOptions) (client.ContainerStartResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if isCompanionID(id) {
+		f.companionStarts = append(f.companionStarts, id)
+		return client.ContainerStartResult{}, nil
+	}
 	f.containerLive = true
 	return client.ContainerStartResult{}, nil
 }
 
-func (f *fakeClient) ContainerInspect(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+func (f *fakeClient) ContainerInspect(_ context.Context, id string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if isCompanionID(id) {
+		options, exists := f.companionOpts[id]
+		if !exists {
+			return client.ContainerInspectResult{}, fakeNotFound{"container"}
+		}
+		return client.ContainerInspectResult{Container: container.InspectResponse{ID: id, State: &container.State{Running: true}, Config: options.Config}}, nil
+	}
 	if f.containerID == "" {
 		return client.ContainerInspectResult{}, fakeNotFound{"container"}
 	}
@@ -198,16 +228,24 @@ func (f *fakeClient) ContainerLogs(context.Context, string, client.ContainerLogs
 	return io.NopCloser(bytes.NewReader(f.logs)), nil
 }
 
-func (f *fakeClient) ContainerStop(context.Context, string, client.ContainerStopOptions) (client.ContainerStopResult, error) {
+func (f *fakeClient) ContainerStop(_ context.Context, id string, _ client.ContainerStopOptions) (client.ContainerStopResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if isCompanionID(id) {
+		return client.ContainerStopResult{}, nil
+	}
 	f.containerLive = false
 	return client.ContainerStopResult{}, nil
 }
 
-func (f *fakeClient) ContainerRemove(context.Context, string, client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
+func (f *fakeClient) ContainerRemove(_ context.Context, id string, options client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if isCompanionID(id) {
+		delete(f.companionOpts, id)
+		f.companionRemoves = append(f.companionRemoves, options)
+		return client.ContainerRemoveResult{}, nil
+	}
 	f.containerID = ""
 	return client.ContainerRemoveResult{}, nil
 }
@@ -498,6 +536,116 @@ func TestManagerStopRejectsNilAndForeignSandbox(t *testing.T) {
 	other := testManager(t, &fakeClient{})
 	if err := other.Stop(context.Background(), sandbox); err == nil || !strings.Contains(err.Error(), "another manager") {
 		t.Fatalf("Stop foreign sandbox error = %v", err)
+	}
+}
+
+func companionRequest() core.SandboxRequest {
+	request := testRequest()
+	request.Environment.Companions = []core.Companion{
+		{Name: "canvas", Image: "example.invalid/canvas:fixture", Env: map[string]string{"ZED": "2", "ALPHA": "1"}},
+		{Name: "woo-db", Image: "example.invalid/mysql:fixture", Aliases: []string{"woo-db", "mysql"}},
+		{Name: "poste", Image: "example.invalid/poste:fixture", Hostname: "mcp.com"},
+	}
+	return request
+}
+
+func TestStartRunsCompanionsOnlyOnTheTaskNetwork(t *testing.T) {
+	fake := &fakeClient{logs: multiplexed("app stdout", "app stderr")}
+	manager := testManager(t, fake)
+	live, err := manager.Start(context.Background(), companionRequest())
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	sandbox := live.(*Sandbox)
+	if !reflect.DeepEqual(fake.companionStarts, []string{"companion-canvas", "companion-woo-db", "companion-poste"}) || fake.containerID != "container-id" {
+		t.Fatalf("started companions %v, task container %q", fake.companionStarts, fake.containerID)
+	}
+	canvas := fake.companionOpts["companion-canvas"]
+	if canvas.Name != "aries-app-fixedid-canvas" || canvas.Config.Image != "example.invalid/canvas:fixture" || canvas.Config.Hostname != "" {
+		t.Fatalf("companion options = %#v", canvas)
+	}
+	if !reflect.DeepEqual(canvas.Config.Env, []string{"ALPHA=1", "ZED=2"}) {
+		t.Fatalf("companion environment = %#v", canvas.Config.Env)
+	}
+	labels := canvas.Config.Labels
+	if labels["aries.managed"] != "true" || labels["aries.run"] != "run-1" || labels["aries.task"] != "task-1" ||
+		labels["aries.kind"] != "task-companion" || labels["aries.component"] != "application" || labels["aries.application"] != "canvas" {
+		t.Fatalf("companion labels = %#v", labels)
+	}
+	host := canvas.HostConfig
+	if string(host.NetworkMode) != "aries-net-fixedid" || len(host.PortBindings) != 0 || len(host.Binds) != 0 || len(host.Mounts) != 0 || host.Privileged {
+		t.Fatalf("companion host config = %#v", host)
+	}
+	if aliases := canvas.NetworkingConfig.EndpointsConfig["aries-net-fixedid"].Aliases; !reflect.DeepEqual(aliases, []string{"canvas"}) {
+		t.Fatalf("default aliases = %v", aliases)
+	}
+	if aliases := fake.companionOpts["companion-woo-db"].NetworkingConfig.EndpointsConfig["aries-net-fixedid"].Aliases; !reflect.DeepEqual(aliases, []string{"woo-db", "mysql"}) {
+		t.Fatalf("configured aliases = %v", aliases)
+	}
+	if hostname := fake.companionOpts["companion-poste"].Config.Hostname; hostname != "mcp.com" {
+		t.Fatalf("companion hostname = %q", hostname)
+	}
+	if err := manager.Stop(context.Background(), sandbox); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if len(fake.companionOpts) != 0 || fake.networkExists || fake.containerID != "" {
+		t.Fatal("Stop left resources behind")
+	}
+	if len(fake.companionRemoves) != 3 {
+		t.Fatalf("companion removals = %d", len(fake.companionRemoves))
+	}
+	for _, options := range fake.companionRemoves {
+		if !options.Force || !options.RemoveVolumes {
+			t.Fatalf("companion removal must force and drop volumes: %+v", options)
+		}
+	}
+	stdout, _ := os.ReadFile(filepath.Join(sandbox.artifactDir, "companions", "canvas.stdout.log"))
+	stderr, _ := os.ReadFile(filepath.Join(sandbox.artifactDir, "companions", "woo-db.stderr.log"))
+	if string(stdout) != "app stdout" || string(stderr) != "app stderr" {
+		t.Fatalf("companion logs = %q / %q", stdout, stderr)
+	}
+	if err := manager.Stop(context.Background(), sandbox); err != nil || len(fake.companionRemoves) != 3 {
+		t.Fatalf("repeated Stop() = %v, removals %d", err, len(fake.companionRemoves))
+	}
+}
+
+func TestStartRemovesStartedCompanionsWhenOneFails(t *testing.T) {
+	fake := &fakeClient{companionFail: "woo-db"}
+	_, err := testManager(t, fake).Start(context.Background(), companionRequest())
+	if err == nil || !strings.Contains(err.Error(), `create docker companion "woo-db"`) {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if len(fake.companionOpts) != 0 || fake.networkExists || fake.containerID != "" {
+		t.Fatal("failed Start left resources behind")
+	}
+	if len(fake.companionRemoves) != 1 || !fake.companionRemoves[0].RemoveVolumes {
+		t.Fatalf("rollback removals = %+v", fake.companionRemoves)
+	}
+}
+
+func TestValidateEnvironmentRejectsInvalidCompanions(t *testing.T) {
+	valid := core.Companion{Name: "canvas", Image: "example.invalid/canvas:fixture"}
+	for name, companions := range map[string][]core.Companion{
+		"empty name":      {{Image: valid.Image}},
+		"uppercase name":  {{Name: "Canvas", Image: valid.Image}},
+		"leading hyphen":  {{Name: "-canvas", Image: valid.Image}},
+		"duplicate name":  {valid, valid},
+		"missing image":   {{Name: "canvas"}},
+		"bad environment": {{Name: "canvas", Image: valid.Image, Env: map[string]string{"1BAD": "x"}}},
+		"sandbox alias":   {{Name: "canvas", Image: valid.Image, Aliases: []string{NetworkAlias}}},
+		"shared alias":    {valid, {Name: "poste", Image: valid.Image, Aliases: []string{"canvas"}}},
+		"bad hostname":    {{Name: "poste", Image: valid.Image, Hostname: "Mail..example"}},
+	} {
+		environment := testEnvironment()
+		environment.Companions = companions
+		if err := validateEnvironment(environment); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	environment := testEnvironment()
+	environment.Companions = []core.Companion{valid, {Name: "poste", Image: valid.Image, Hostname: "mcp.com", Aliases: []string{"poste", "mail"}}}
+	if err := validateEnvironment(environment); err != nil {
+		t.Fatalf("valid companions rejected: %v", err)
 	}
 }
 

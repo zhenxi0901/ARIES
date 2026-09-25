@@ -19,6 +19,19 @@ operations. A pair-specific bridge may use a narrow sandbox capability such as
 streaming command execution, but the harness does not receive Docker daemon
 access.
 
+## Companions
+
+A benchmark may ask for companion containers beside the sandbox
+(`core.Environment.Companions`): services its tools talk to, such as a web
+application seeded for the task. The Docker implementation starts each one on
+the task's own network under its aliases, before the task container, with no
+published ports, bind mounts, or Docker socket, labelled
+`aries.component=application` so the resource monitor samples it. Companions
+are removed with their anonymous volumes when the sandbox stops, so every task
+occurrence starts from a fresh copy and occurrences can run concurrently
+without sharing state. Readiness is the benchmark's to check. On a pod-based
+sandbox the same list maps to extra containers in the task pod.
+
 ## Customization & Contribution Guide
 
 A new sandbox implementation must preserve exact command argument boundaries,
