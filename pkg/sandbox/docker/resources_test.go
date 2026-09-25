@@ -72,7 +72,7 @@ func (fake *fakeResourceAPI) Close() error {
 }
 
 func resourceSummary(id, name, kind string) containertypes.Summary {
-	component := map[string]string{"task-container": "sandbox", "openclaw-harness": "harness"}[kind]
+	component := map[string]string{"task-container": "sandbox", "openclaw-harness": "harness", "task-companion": "application"}[kind]
 	return containertypes.Summary{
 		ID: id, Names: []string{"/" + name}, State: containertypes.StateRunning,
 		Labels: map[string]string{"aries.managed": "true", "aries.run": "run-1", "aries.task": "fix-git", "aries.kind": kind, "aries.component": component},
@@ -141,6 +141,21 @@ func TestDockerResourceSourceReturnsRawPortableReadings(t *testing.T) {
 	}
 	if err := source.Close(); err != nil || fake.closes != 1 {
 		t.Fatalf("Close = %v, calls %d", err, fake.closes)
+	}
+}
+
+func TestDockerResourceSourceSamplesCompanionApplications(t *testing.T) {
+	source, fake := newFakeResourceSource()
+	app := resourceSummary("4444444444444444444444444444444444444444444444444444444444444444", "aries-app-canvas", "task-companion")
+	fake.items = append(fake.items, app)
+	fake.inspections[app.ID] = resourceInspection(app)
+	fake.stats[app.ID] = resourceStats(time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC), 789, 1<<30, 32<<30)
+	readings, err := source.Sample(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(readings) != 3 || readings[0].Component != "application" || readings[0].MemoryUsageBytes != 1<<30 {
+		t.Fatalf("readings = %+v", readings)
 	}
 }
 
