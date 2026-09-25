@@ -29,8 +29,11 @@ published ports, bind mounts, or Docker socket, labelled
 `aries.component=application` so the resource monitor samples it. Companions
 are removed with their anonymous volumes when the sandbox stops, so every task
 occurrence starts from a fresh copy and occurrences can run concurrently
-without sharing state. Readiness is the benchmark's to check. On a pod-based
-sandbox the same list maps to extra containers in the task pod.
+without sharing state. Readiness is the benchmark's to check. A pod-based
+sandbox must keep the same contract (private endpoints, private writable
+state, the occurrence's lifetime) but not necessarily the same layout: the
+containers of one pod share a port space, and a volume such as `emptyDir`
+starts empty rather than from the image's content.
 
 ## Customization & Contribution Guide
 
