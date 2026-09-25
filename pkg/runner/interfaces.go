@@ -29,7 +29,9 @@ type AgentHarness interface {
 }
 
 // ToolSandbox owns the lifecycle of the live environment later inspected by
-// evaluation.
+// evaluation. When Start fails it returns a nil Sandbox, unless resources it
+// created could not be rolled back; then it returns the Sandbox with the error
+// so that the caller can Stop it and report the cleanup truthfully.
 type ToolSandbox interface {
 	Start(context.Context, core.SandboxRequest) (Sandbox, error)
 	Stop(context.Context, Sandbox) error

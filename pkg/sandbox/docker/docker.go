@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -44,6 +45,11 @@ const (
 	execDrainTimeout      = 200 * time.Millisecond
 	execTrailerKeep       = 128
 	execStatePrefix       = "/tmp/.aries-exec-"
+	// companionLogTimeout and companionLogTail bound how long, and how much
+	// of each companion's output, cleanup spends on logs, so that collecting
+	// them cannot use up the time removal needs.
+	companionLogTimeout = 10 * time.Second
+	companionLogTail    = "2000"
 	rootExecUser          = "0:0"
 	execShell             = `state=$1; token=$2; shift 2; umask 077; trap 'rm -f "$state" "$state.tmp"' EXIT; exec 3<&0; setsid "$@" <&3 & pid=$!; printf '%s\n' "$pid" >"$state.tmp" || exit 125; mv "$state.tmp" "$state" || exit 125; wait "$pid"; status=$?; rm -f "$state" "$state.tmp"; trap - EXIT; printf '\036ARIES_EXEC_EXIT_%s=%d\037' "$token" "$status" >&2; exit "$status"`
 	cancelExecShell       = `state=$1; attempts=0; while [ ! -r "$state" ]; do attempts=$((attempts+1)); [ "$attempts" -ge 200 ] && exit 70; sleep 0.01; done; IFS= read -r pgid <"$state" || exit 71; case "$pgid" in ''|*[!0-9]*|0|1) exit 71;; esac; kill -TERM "-$pgid" 2>/dev/null || :; sleep 0.2; kill -KILL "-$pgid" 2>/dev/null || :; rm -f "$state"; exit 0`
@@ -128,6 +134,26 @@ type companionContainer struct {
 	containerName string
 	id            string
 	owned         bool
+	// For companions.json: what was asked for, what Docker ran, and when.
+	image       string
+	imageID     string
+	startedAt   time.Time
+	removedAt   time.Time
+	removeError string
+}
+
+// companionRecord is one line of sandbox/companions.json, the evidence of
+// which copy an occurrence ran, from which image, and when it started and
+// was removed.
+type companionRecord struct {
+	Name        string    `json:"name"`
+	Container   string    `json:"container"`
+	Image       string    `json:"image"`
+	ImageID     string    `json:"image_id,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	RemovedAt   time.Time `json:"removed_at,omitempty"`
+	Owned       bool      `json:"owned"`
+	RemoveError string    `json:"remove_error,omitempty"`
 }
 
 // Close releases the manager's Docker SDK transport. Resource cleanup remains Stop's responsibility.
@@ -227,24 +253,29 @@ func (m *Manager) Start(ctx context.Context, request core.SandboxRequest) (runne
 	// benchmark's to check, since only it knows what "ready" means.
 	for _, companion := range request.Environment.Companions {
 		if err := sandbox.startCompanion(ctx, request, "aries-app-"+id+"-"+companion.Name, companion); err != nil {
-			return nil, sandbox.rollbackStart(ctx, err)
+			return sandbox.failStart(ctx, err)
+		}
+	}
+	if len(request.Environment.Companions) != 0 {
+		if err := sandbox.writeCompanionRecords(); err != nil {
+			return sandbox.failStart(ctx, err)
 		}
 	}
 
 	created, err := m.client.ContainerCreate(ctx, containerOptions(request, sandbox, ownershipLabels(request, "task-container")))
 	if err != nil {
-		return nil, sandbox.rollbackStart(ctx, fmt.Errorf("create docker task container: %w", err))
+		return sandbox.failStart(ctx, fmt.Errorf("create docker task container: %w", err))
 	}
 	if strings.TrimSpace(created.ID) == "" {
-		return nil, sandbox.rollbackStart(ctx, errors.New("create docker task container: Docker returned an empty container ID"))
+		return sandbox.failStart(ctx, errors.New("create docker task container: Docker returned an empty container ID"))
 	}
 	sandbox.containerID = created.ID
 	sandbox.containerOwned = true
 	if _, err := m.client.ContainerStart(ctx, sandbox.containerID, client.ContainerStartOptions{}); err != nil {
-		return nil, sandbox.rollbackStart(ctx, fmt.Errorf("start docker task container: %w", err))
+		return sandbox.failStart(ctx, fmt.Errorf("start docker task container: %w", err))
 	}
 	if err := sandbox.verifyLive(ctx); err != nil {
-		return nil, sandbox.rollbackStart(ctx, err)
+		return sandbox.failStart(ctx, err)
 	}
 	m.logger.WithContext(ctx).WithFields(logrus.Fields{"container": sandbox.containerName, "network": sandbox.networkName}).Info("docker task sandbox started")
 	return sandbox, nil
@@ -289,12 +320,21 @@ func (s *Sandbox) startCompanion(ctx context.Context, request core.SandboxReques
 	if strings.TrimSpace(created.ID) == "" {
 		return fmt.Errorf("create docker companion %q: Docker returned an empty container ID", companion.Name)
 	}
+	entry := &companionContainer{name: companion.Name, containerName: containerName, id: created.ID, owned: true, image: companion.Image}
 	s.mu.Lock()
-	s.companions = append(s.companions, &companionContainer{name: companion.Name, containerName: containerName, id: created.ID, owned: true})
+	s.companions = append(s.companions, entry)
 	s.mu.Unlock()
 	if _, err := s.client.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return fmt.Errorf("start docker companion %q: %w", companion.Name, err)
 	}
+	started := time.Now().UTC()
+	inspection, err := s.client.ContainerInspect(ctx, created.ID, client.ContainerInspectOptions{})
+	if err != nil {
+		return fmt.Errorf("inspect docker companion %q: %w", companion.Name, err)
+	}
+	s.mu.Lock()
+	entry.startedAt, entry.imageID = started, inspection.Container.Image
+	s.mu.Unlock()
 	s.owner.logger.WithContext(ctx).WithFields(logrus.Fields{"container": containerName, "network": s.networkName}).Info("docker companion started")
 	return nil
 }
@@ -1112,7 +1152,9 @@ func (s *Sandbox) removeCompanions(ctx context.Context, collectLogs bool) []erro
 			if err := os.MkdirAll(directory, 0o700); err != nil {
 				errs = append(errs, fmt.Errorf("create docker companion log directory: %w", err))
 			} else {
-				errs = append(errs, s.collectContainerLogs(ctx, companion.id, filepath.Join(directory, companion.name)))
+				logCtx, cancel := context.WithTimeout(ctx, companionLogTimeout)
+				errs = append(errs, s.collectContainerLogsTail(logCtx, companion.id, filepath.Join(directory, companion.name), companionLogTail))
+				cancel()
 			}
 		}
 		_, err := s.client.ContainerStop(ctx, companion.id, client.ContainerStopOptions{Timeout: intPointer(5)})
@@ -1124,17 +1166,63 @@ func (s *Sandbox) removeCompanions(ctx context.Context, collectLogs bool) []erro
 			errs = append(errs, fmt.Errorf("remove docker companion %q: %w", companion.name, err))
 		}
 		_, err = s.client.ContainerInspect(ctx, companion.id, client.ContainerInspectOptions{})
+		var confirmErr error
 		if cerrdefs.IsNotFound(err) {
 			s.mu.Lock()
 			companion.owned = false
+			companion.removedAt, companion.removeError = time.Now().UTC(), ""
 			s.mu.Unlock()
 		} else if err == nil {
-			errs = append(errs, fmt.Errorf("confirm docker companion %q absence: container still exists", companion.name))
+			confirmErr = fmt.Errorf("confirm docker companion %q absence: container still exists", companion.name)
 		} else {
-			errs = append(errs, fmt.Errorf("confirm docker companion %q absence: %w", companion.name, err))
+			confirmErr = fmt.Errorf("confirm docker companion %q absence: %w", companion.name, err)
+		}
+		if confirmErr != nil {
+			errs = append(errs, confirmErr)
+			s.mu.Lock()
+			companion.removeError = confirmErr.Error()
+			s.mu.Unlock()
 		}
 	}
+	if len(companions) != 0 {
+		errs = append(errs, s.writeCompanionRecords())
+	}
 	return errs
+}
+
+// writeCompanionRecords writes sandbox/companions.json from the current state.
+func (s *Sandbox) writeCompanionRecords() error {
+	s.mu.Lock()
+	records := make([]companionRecord, 0, len(s.companions))
+	for _, companion := range s.companions {
+		records = append(records, companionRecord{
+			Name: companion.name, Container: companion.containerName, Image: companion.image, ImageID: companion.imageID,
+			StartedAt: companion.startedAt, RemovedAt: companion.removedAt, Owned: companion.owned, RemoveError: companion.removeError,
+		})
+	}
+	s.mu.Unlock()
+	content, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode docker companion records: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.artifactDir, "companions.json"), append(content, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write docker companion records: %w", err)
+	}
+	return nil
+}
+
+// failStart rolls back a partial start. When the rollback cannot confirm that
+// everything is gone, the sandbox is returned with the error so the caller
+// still holds what it owns and can Stop it again; otherwise it returns nil.
+func (s *Sandbox) failStart(ctx context.Context, primary error) (runner.Sandbox, error) {
+	err := s.rollbackStart(ctx, primary)
+	s.mu.Lock()
+	owned := s.containerOwned || s.networkOwned || s.ownsCompanionLocked()
+	s.mu.Unlock()
+	if owned {
+		return s, err
+	}
+	return nil, err
 }
 
 func (s *Sandbox) ownsCompanionLocked() bool {
@@ -1156,12 +1244,12 @@ func (s *Sandbox) rollbackStart(ctx context.Context, primary error) error {
 }
 
 func (s *Sandbox) collectLogs(ctx context.Context) error {
-	return s.collectContainerLogs(ctx, s.containerID, filepath.Join(s.artifactDir, "container"))
+	return s.collectContainerLogsTail(ctx, s.containerID, filepath.Join(s.artifactDir, "container"), "")
 }
 
-// collectContainerLogs writes one container's output to <prefix>.stdout.log
-// and <prefix>.stderr.log.
-func (s *Sandbox) collectContainerLogs(ctx context.Context, containerID, prefix string) error {
+// collectContainerLogsTail writes one container's output to <prefix>.stdout.log
+// and <prefix>.stderr.log; a non-empty tail keeps only that many last lines.
+func (s *Sandbox) collectContainerLogsTail(ctx context.Context, containerID, prefix, tail string) error {
 	stdout, err := os.OpenFile(prefix+".stdout.log", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("create docker task stdout log: %w", err)
@@ -1172,7 +1260,7 @@ func (s *Sandbox) collectContainerLogs(ctx context.Context, containerID, prefix 
 		return fmt.Errorf("create docker task stderr log: %w", err)
 	}
 	defer stderr.Close()
-	stream, err := s.client.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true})
+	stream, err := s.client.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true, Tail: tail})
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return nil

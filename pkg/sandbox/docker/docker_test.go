@@ -92,10 +92,12 @@ type fakeClient struct {
 	closeErr       error
 
 	// Companions are tracked apart from the one task container, by ID.
-	companionOpts    map[string]client.ContainerCreateOptions
-	companionFail    string
-	companionStarts  []string
-	companionRemoves []client.ContainerRemoveOptions
+	companionOpts      map[string]client.ContainerCreateOptions
+	companionFail      string
+	companionStarts    []string
+	companionRemoves   []client.ContainerRemoveOptions
+	companionStuck     int // removals that leave the companion in place
+	companionLogOption []client.ContainerLogsOptions
 }
 
 func isCompanionID(id string) bool { return strings.HasPrefix(id, "companion-") }
@@ -189,7 +191,7 @@ func (f *fakeClient) ContainerInspect(_ context.Context, id string, _ client.Con
 		if !exists {
 			return client.ContainerInspectResult{}, fakeNotFound{"container"}
 		}
-		return client.ContainerInspectResult{Container: container.InspectResponse{ID: id, State: &container.State{Running: true}, Config: options.Config}}, nil
+		return client.ContainerInspectResult{Container: container.InspectResponse{ID: id, Image: "sha256:" + id, State: &container.State{Running: true}, Config: options.Config}}, nil
 	}
 	if f.containerID == "" {
 		return client.ContainerInspectResult{}, fakeNotFound{"container"}
@@ -222,9 +224,12 @@ func (f *fakeClient) ContainerTop(context.Context, string, client.ContainerTopOp
 	return client.ContainerTopResult{Titles: []string{"PID", "PPID", "PGID"}, Processes: processes}, nil
 }
 
-func (f *fakeClient) ContainerLogs(context.Context, string, client.ContainerLogsOptions) (client.ContainerLogsResult, error) {
+func (f *fakeClient) ContainerLogs(_ context.Context, id string, options client.ContainerLogsOptions) (client.ContainerLogsResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if isCompanionID(id) {
+		f.companionLogOption = append(f.companionLogOption, options)
+	}
 	return io.NopCloser(bytes.NewReader(f.logs)), nil
 }
 
@@ -242,8 +247,12 @@ func (f *fakeClient) ContainerRemove(_ context.Context, id string, options clien
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if isCompanionID(id) {
-		delete(f.companionOpts, id)
 		f.companionRemoves = append(f.companionRemoves, options)
+		if f.companionStuck > 0 {
+			f.companionStuck--
+			return client.ContainerRemoveResult{}, errors.New("device or resource busy")
+		}
+		delete(f.companionOpts, id)
 		return client.ContainerRemoveResult{}, nil
 	}
 	f.containerID = ""
@@ -606,6 +615,41 @@ func TestStartRunsCompanionsOnlyOnTheTaskNetwork(t *testing.T) {
 	}
 	if err := manager.Stop(context.Background(), sandbox); err != nil || len(fake.companionRemoves) != 3 {
 		t.Fatalf("repeated Stop() = %v, removals %d", err, len(fake.companionRemoves))
+	}
+	for _, options := range fake.companionLogOption {
+		if options.Tail != companionLogTail {
+			t.Fatalf("companion logs must be bounded: %+v", options)
+		}
+	}
+	var records []companionRecord
+	content, err := os.ReadFile(filepath.Join(sandbox.artifactDir, "companions.json"))
+	if err != nil || json.Unmarshal(content, &records) != nil || len(records) != 3 {
+		t.Fatalf("companions.json = %s, %v", content, err)
+	}
+	for _, record := range records {
+		if record.Owned || record.ImageID != "sha256:companion-"+record.Name || record.StartedAt.IsZero() || record.RemovedAt.Before(record.StartedAt) {
+			t.Fatalf("companion record = %+v", record)
+		}
+	}
+}
+
+// A start whose rollback cannot remove everything returns the sandbox with
+// the error, so the runner still holds it and can stop it again.
+func TestStartKeepsTheHandleWhenRollbackLeavesACompanion(t *testing.T) {
+	fake := &fakeClient{companionFail: "poste", companionStuck: 1}
+	manager := testManager(t, fake)
+	live, err := manager.Start(context.Background(), companionRequest())
+	if err == nil || !strings.Contains(err.Error(), "rollback partial docker sandbox") {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if live == nil {
+		t.Fatal("a start that left a companion behind returned no sandbox")
+	}
+	if err := manager.Stop(context.Background(), live); err != nil {
+		t.Fatalf("Stop() after a failed rollback = %v", err)
+	}
+	if len(fake.companionOpts) != 0 || fake.networkExists {
+		t.Fatal("the retried stop left resources behind")
 	}
 }
 
