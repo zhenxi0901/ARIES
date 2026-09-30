@@ -25,6 +25,7 @@ func NewHermes(cfg config.Config, outputRoot string, lookup func(string) ([]byte
 		Compaction:             hermesCompaction(cfg.Harness.Compaction),
 		ExtraBody:              hermesExtraBody(cfg.Harness.Hermes),
 		MCPServers:             cfg.Harness.MCPServers,
+		RedactEnv:              cfg.BenchmarkCredentialEnv(),
 	}
 
 	if cfg.Harness.Mode == hermesharness.ModeVoiceTranscribe {

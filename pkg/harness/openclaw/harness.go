@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -67,6 +68,12 @@ type Options struct {
 	StartTimeout           time.Duration
 	AgentTimeout           time.Duration
 	Logger                 *logrus.Logger
+	// RedactEnv names host environment variables whose values OpenClaw is
+	// never given but the harness still scrubs from what it saves: a
+	// benchmark's credentials that reach the sandbox, where the agent can
+	// read them and repeat them (Toolathlon's account tokens). They are read
+	// through APIKeyLookup at Start; an unset variable is skipped.
+	RedactEnv []string
 }
 
 type RealtimeOptions struct {
@@ -112,6 +119,7 @@ type Manager struct {
 	subagentsEnabled       bool
 	maxConcurrentSubagents int
 	mcpServers             []core.MCPServerConfig
+	redactEnv              []string
 	newID                  func() (string, error)
 	newGateway             func(string, []byte) (gatewayConnection, error)
 	newAgentGateway        func(string, []byte) (gatewayConnection, error)
@@ -172,6 +180,7 @@ type session struct {
 	gatewayToken      []byte
 	mcpSecrets        [][]byte
 	mcpSecretFiles    map[string][]byte
+	redactValues      [][]byte
 	gatewayURL        string
 	agentIdempotency  string
 	runAttempted      bool
@@ -248,7 +257,7 @@ func New(options Options) (*Manager, error) {
 		agentTimeout: options.AgentTimeout, logger: options.Logger,
 		apiKeyLookup: options.APIKeyLookup, mode: options.Mode, realtime: options.Realtime,
 		webSearchEnabled: options.WebSearchEnabled, extractAPIKeyEnv: options.ExtractAPIKeyEnv, subagentsEnabled: options.SubagentsEnabled,
-		maxConcurrentSubagents: options.MaxConcurrentSubagents, mcpServers: options.MCPServers, newID: randomID,
+		maxConcurrentSubagents: options.MaxConcurrentSubagents, mcpServers: options.MCPServers, redactEnv: slices.Clone(options.RedactEnv), newID: randomID,
 		newGateway: func(rawURL string, token []byte) (gatewayConnection, error) {
 			return newGatewayClientWithDisposition(rawURL, token, gatewayScopes(options.Mode), gatewayEventDisposition(options.Mode))
 		},
@@ -442,6 +451,7 @@ func (manager *Manager) Start(ctx context.Context, request core.HarnessRequest) 
 		runID: request.RunID, taskID: request.TaskID, safeTaskID: safeTaskID(request.TaskID), attemptID: id,
 		containerName: "aries-openclaw-" + id, artifactDir: filepath.Join(manager.outputDir, request.TaskID, "harness"),
 		endpoint: request.Endpoint, model: request.Model, agentTimeout: agentTimeout, apiKey: apiKey, realtimeAPIKey: realtimeAPIKey, extractAPIKey: extractAPIKey, gatewayToken: gatewayToken, mcpSecrets: mcpSecrets, mcpSecretFiles: mcpSecretFiles, agentIdempotency: agentIdempotency,
+		redactValues: core.LookupSecretParts(manager.apiKeyLookup, manager.redactEnv),
 	}
 	active.deploymentRequest = deployment.Request{
 		Name: active.containerName, Image: manager.image,
@@ -1180,7 +1190,7 @@ func (manager *Manager) collectTelemetry(ctx context.Context, active *session) (
 	if err != nil || len(archive) > maxDockerOutput {
 		return nil, errors.New("OpenClaw telemetry archive exceeded its bound")
 	}
-	return extractTelemetry(active.artifactDir, archive, active.apiKey, active.realtimeAPIKey, active.extractAPIKey, active.gatewayToken)
+	return extractTelemetry(active.artifactDir, archive, sessionSecrets(active)...)
 }
 
 func failedHarnessResult(active *session, started time.Time, err error) core.HarnessResult {
@@ -1453,12 +1463,23 @@ func clearSessionSecrets(active *session) {
 		clear(active.mcpSecretFiles[k])
 	}
 	active.mcpSecretFiles = nil
+	for i := range active.redactValues {
+		clear(active.redactValues[i])
+	}
+	active.redactValues = nil
 	active.agentIdempotency = ""
 }
 
-func redactSession(content []byte, active *session) []byte {
+// sessionSecrets is everything scrubbed from what the harness saves: its own
+// keys and gateway token, the MCP servers' secrets and the parts of the
+// RedactEnv values.
+func sessionSecrets(active *session) [][]byte {
 	secrets := append([][]byte{active.apiKey, active.realtimeAPIKey, active.extractAPIKey, active.gatewayToken}, active.mcpSecrets...)
-	return redactSecrets(content, secrets...)
+	return append(secrets, active.redactValues...)
+}
+
+func redactSession(content []byte, active *session) []byte {
+	return redactSecrets(content, sessionSecrets(active)...)
 }
 
 type sessionRedactedError struct {

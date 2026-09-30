@@ -34,6 +34,7 @@ type fakeDeployment struct {
 	validatedSecrets                                                       [][]byte
 	created                                                                deployment.Request
 	archive                                                                []byte
+	telemetry                                                              []byte
 	removed                                                                bool
 	copyToErr, containerLogsErr, copyFromErr, stopErr, closeErr            error
 	startCalls, logsCalls, stopCalls, removeCalls, createCalls, closeCalls int
@@ -119,6 +120,9 @@ func (fake *fakeDeployment) DownloadArchive(context.Context, string, string) (io
 	var archive bytes.Buffer
 	writer := tar.NewWriter(&archive)
 	content := []byte("{\"event\":\"tool\"}\n")
+	if fake.telemetry != nil {
+		content = fake.telemetry
+	}
 	_ = writer.WriteHeader(&tar.Header{Name: "sessions/run.trajectory.jsonl", Mode: 0o600, Size: int64(len(content))})
 	_, _ = writer.Write(content)
 	_ = writer.Close()
@@ -419,6 +423,64 @@ func TestAgentResultAndErrorsRedactEverySessionSecret(t *testing.T) {
 			}
 			assertJSONValueHasNoSecrets(t, decoded, secrets)
 		})
+	}
+}
+
+// A benchmark's credentials that reach the sandbox are never given to
+// OpenClaw, but the agent can read them there. Start reads the RedactEnv
+// values (an unset one is skipped), and the session trajectory copied out of
+// the container is scrubbed of them and of the MCP servers' secrets.
+func TestTelemetryScrubsRedactEnvValuesAndMCPSecrets(t *testing.T) {
+	fake := newFakeDeployment()
+	token := "ghp_benchmarktoken123"
+	manager, err := New(Options{
+		Deployment: fake,
+		Image:      testOpenClawImage, OutputDir: t.TempDir(), StartTimeout: time.Second, AgentTimeout: time.Second,
+		RedactEnv: []string{"TOOLATHLON_GITHUB_TOKEN", "UNSET_TOKEN"},
+		APIKeyLookup: func(name string) ([]byte, bool) {
+			switch name {
+			case "TOOLATHLON_GITHUB_TOKEN":
+				return []byte(token), true
+			case "UNSET_TOKEN":
+				return nil, false
+			}
+			return []byte("model-secret"), true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.newID = func() (string, error) { return "attempt", nil }
+	manager.newGateway = func(string, []byte) (gatewayConnection, error) { return &stubGateway{}, nil }
+	request := core.HarnessRequest{Network: "aries-net-test", RunID: "run-1", TaskID: "fix-git", Endpoint: endpointFiles(t), Model: testModel()}
+	if err := manager.Start(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	active := manager.active
+	if len(active.redactValues) != 1 || string(active.redactValues[0]) != token {
+		t.Fatalf("redact values = %q", active.redactValues)
+	}
+	mcpSecret := "mcp-secret-value-123"
+	active.mcpSecrets = [][]byte{[]byte(mcpSecret)}
+	fake.telemetry = []byte(`{"tool":"exec","output":"github_token = ` + token + `; key ` + mcpSecret + `"}` + "\n")
+	paths, err := manager.collectTelemetry(context.Background(), active)
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("telemetry = %v, %v", paths, err)
+	}
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(content), token) || strings.Contains(string(content), mcpSecret) || !strings.Contains(string(content), "REDACTED") {
+			t.Fatalf("telemetry %s kept a secret:\n%s", path, content)
+		}
+	}
+	if err := manager.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if active.redactValues != nil {
+		t.Fatal("Stop left the redact values in memory")
 	}
 }
 
